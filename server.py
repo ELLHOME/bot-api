@@ -293,53 +293,78 @@ LAST_AGENT_ERROR = ""   # временно: чтобы увидеть причи
 
 
 def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
-    """Модель сама решает, какие инструменты дёрнуть; сервер исполняет и возвращает результат."""
+    """
+    Агентский цикл. Модель сама решает, какие инструменты дёрнуть; сервер исполняет
+    и подмешивает результаты в контекст следующего захода.
+
+    Почему не «классические» tool-сообщения: Gemini 3 — думающая модель и требует
+    возвращать вместе с вызовом её thought_signature, которая через OpenAI-совместимый
+    слой не отдаётся. Поэтому результаты передаём контекстом — работает на любой модели.
+    """
+    global LAST_AGENT_ERROR
+    LAST_AGENT_ERROR = ""
     if PROVIDER != "gemini":
         return call_model(messages), []          # локально на ollama — без инструментов
     client = _gemini_client()
     if client is None:
         return call_model(messages), []
 
-    global LAST_AGENT_ERROR
-    LAST_AGENT_ERROR = ""
-    msgs, used = list(messages), []
+    used: list[str] = []
+    results: list[str] = []
+    done: dict[str, str] = {}                    # кэш: один и тот же вызов не повторяем
+
+    def with_results(base: list[dict]) -> list[dict]:
+        if not results:
+            return list(base)
+        return list(base) + [{
+            "role": "system",
+            "content": ("РЕЗУЛЬТАТЫ УЖЕ ВЫПОЛНЕННЫХ ИНСТРУМЕНТОВ. Повторно их не вызывай — "
+                        "отвечай клиенту на основе этих данных:\n" + "\n".join(results)),
+        }]
+
     try:
         for _ in range(MAX_STEPS):
             resp = client.chat.completions.create(
-                model=GEMINI_MODEL, messages=msgs, tools=TOOLS, tool_choice="auto"
+                model=GEMINI_MODEL, messages=with_results(messages),
+                tools=TOOLS, tool_choice="auto",
             )
             m = resp.choices[0].message
             calls = getattr(m, "tool_calls", None)
             if not calls:
-                return (m.content or ""), used
+                text = (m.content or "").strip()
+                if text:
+                    return text, used
 
-            msgs.append({
-                "role": "assistant",
-                "content": m.content if m.content else None,
-                "tool_calls": [
-                    {"id": c.id, "type": "function",
-                     "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                    for c in calls
-                ],
-            })
-            for c in calls:
+            fresh = False
+            for c in (calls or []):
+                name = c.function.name
                 try:
                     args = json.loads(c.function.arguments or "{}")
                 except Exception:
                     args = {}
-                result = execute_tool(c.function.name, args)
-                used.append(c.function.name)
-                print(f"🔧 [tool] {c.function.name}({args}) -> {result}")
-                msgs.append({"role": "tool", "tool_call_id": c.id,
-                             "content": json.dumps(result, ensure_ascii=False)})
+                key = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+                if key in done:
+                    continue
+                res = execute_tool(name, args)
+                done[key] = "1"
+                used.append(name)
+                fresh = True
+                print(f"🔧 [tool] {name}({args}) -> {res}")
+                results.append(f"{name}({json.dumps(args, ensure_ascii=False)}) -> "
+                               f"{json.dumps(res, ensure_ascii=False)}")
+            if not fresh:
+                break                             # новых вызовов нет — идём за финальным ответом
 
-        final = client.chat.completions.create(model=GEMINI_MODEL, messages=msgs)
+        # финальный заход БЕЗ инструментов: гарантированно получаем текст
+        final = client.chat.completions.create(
+            model=GEMINI_MODEL, messages=with_results(messages)
+        )
         return (final.choices[0].message.content or ""), used
+
     except Exception as e:
         import traceback
         LAST_AGENT_ERROR = f"{type(e).__name__}: {e}"
         traceback.print_exc()
-        # запасной путь: обычный ответ без инструментов
         fallback = call_model(messages)
         if not (fallback or "").strip():
             fallback = ("Сейчас не могу свериться с прайсом — напишите, пожалуйста, "
