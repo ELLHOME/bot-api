@@ -7,25 +7,23 @@ ELLHOME — лаборатория цифровых продуктов. Дела
 брендинг. Подход — AI-native разработка: один ответственный исполнитель + AI,
 поэтому быстро и под ключ, без потери качества и внимания к деталям.
 
-Услуги и ориентировочные цены (⚠️ примерные — впиши свои реальные):
-- Лендинг (одностраничный сайт) — от 40 000 ₽
-- Корпоративный сайт — от 90 000 ₽
+Услуги, цены и сроки:
+- Лендинг (одностраничный сайт) — от 40 000 ₽, 3–5 дней
+- Корпоративный сайт — от 90 000 ₽, 3–4 недели
 - Интернет-магазин — от 150 000 ₽
-- Чат-бот / AI-ассистент / автоматизация — от 30 000 ₽
-- Веб-приложение / личный кабинет (SaaS) — от 150 000 ₽
-- 3D-визуализация — от 15 000 ₽ за сцену
+- Чат-бот / AI-ассистент / автоматизация — от 30 000 ₽, 5–7 дней
+- Веб-приложение / личный кабинет (SaaS) — от 200 000 ₽
+- 3D-визуализация — от 7 000 ₽ за сцену
 - Моушн-дизайн / анимация — от 20 000 ₽ за ролик
 - Брендинг (логотип + фирменный стиль) — от 50 000 ₽
 - Первичная консультация — бесплатно
 
-Точная стоимость зависит от объёма и сложности — обсуждаем после короткого
-брифа. Чтобы прикинуть смету, лучше оставить заявку.
+Где срок не указан — он зависит от объёма и обсуждается отдельно после брифа.
+Точная стоимость тоже считается под задачу. Чтобы получить смету, лучше всего
+оставить заявку прямо в чате.
 
-Сроки (ориентировочно):
-- Лендинг — 1–2 недели
-- Корпоративный сайт — 2–4 недели
-- Чат-бот / автоматизация — от 1 недели
-- Веб-приложение / ПО — по объёму, обсуждается отдельно
+Условия работы:
+Предоплата 50%, работаем по договору.
 
 Опыт и ниша:
 Силён в технически сложных продуктах, интеграциях, API, платежах и данных.
@@ -36,9 +34,8 @@ GNSS-станций (публичный сайт, личный кабинет, �
 геодезия и мониторинг, но берёмся и за другие ниши.
 
 Как работаем:
-Бриф → смета и план → дизайн → разработка → запуск и поддержка. Предоплата 50%,
-работаем по договору. Возможна доработка существующего проекта или разовая
-консультация, не только «под ключ».
+Бриф → смета и план → дизайн → разработка → запуск и поддержка. Возможна
+доработка существующего проекта или разовая консультация, не только «под ключ».
 
 Контакты и заявки:
 Telegram: @M_B_lab
@@ -57,25 +54,23 @@ interfaces, software, chatbots and AI automation, 3D and motion, branding. The
 approach is AI-native development: a single accountable builder + AI, so it's fast
 and end-to-end, without losing quality or attention to detail.
 
-Services & indicative prices (⚠️ examples — set your real ones):
-- Landing page (one-pager) — from ₽40,000
-- Corporate website — from ₽90,000
-- Online store — from ₽150,000
-- Chatbot / AI assistant / automation — from ₽30,000
-- Web app / personal cabinet (SaaS) — from ₽150,000
-- 3D visualization — from ₽15,000 per scene
-- Motion design / animation — from ₽20,000 per reel
-- Branding (logo + identity) — from ₽50,000
+Services, prices and timelines:
+- Landing page (one-pager) — from RUB 40,000, 3–5 days
+- Corporate website — from RUB 90,000, 3–4 weeks
+- Online store — from RUB 150,000
+- Chatbot / AI assistant / automation — from RUB 30,000, 5–7 days
+- Web app / personal cabinet (SaaS) — from RUB 200,000
+- 3D visualization — from RUB 7,000 per scene
+- Motion design / animation — from RUB 20,000 per reel
+- Branding (logo + identity) — from RUB 50,000
 - First consultation — free
 
-The exact price depends on scope and complexity — discussed after a short brief.
-To get an estimate, it's best to leave a request.
+Where no timeline is listed, it depends on scope and is agreed after a brief.
+The exact price is also calculated per task. To get an estimate, the best way is
+to leave a request right here in the chat.
 
-Timelines (approximate):
-- Landing page — 1–2 weeks
-- Corporate website — 2–4 weeks
-- Chatbot / automation — from 1 week
-- Web app / software — depends on scope, discussed separately
+Terms:
+50% upfront, work under a contract.
 
 Experience & niche:
 Strong at technically complex products, integrations, APIs, payments and data.
@@ -86,9 +81,9 @@ MonTerra — a digital brand for geotechnical monitoring. Special expertise in
 geodesy and monitoring, but other niches are welcome too.
 
 How we work:
-Brief → estimate and plan → design → development → launch and support. 50% upfront,
-work under a contract. We also do improvements to an existing project or a one-off
-consultation, not only full turnkey builds.
+Brief → estimate and plan → design → development → launch and support. We also do
+improvements to an existing project or a one-off consultation, not only full
+turnkey builds.
 
 Contacts & requests:
 Telegram: @M_B_lab
