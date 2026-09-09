@@ -1,0 +1,16 @@
+{
+  "currency": "RUB",
+  "terms_ru": "Предоплата 50%, работа по договору. Точная смета — после короткого брифа. Первичная консультация бесплатна.",
+  "terms_en": "50% upfront, work under a contract. Exact estimate after a short brief. First consultation is free.",
+  "services": [
+    { "key": "landing",   "ru": "Лендинг (одностраничный сайт)",        "en": "Landing page",                 "from": 40000,  "term_ru": "3–5 дней",     "term_en": "3–5 days" },
+    { "key": "corporate", "ru": "Корпоративный сайт",                   "en": "Corporate website",            "from": 90000,  "term_ru": "3–4 недели",   "term_en": "3–4 weeks" },
+    { "key": "shop",      "ru": "Интернет-магазин",                     "en": "Online store",                 "from": 150000, "term_ru": "по объёму",    "term_en": "depends on scope" },
+    { "key": "bot",       "ru": "Чат-бот / AI-ассистент / автоматизация","en": "Chatbot / AI assistant",      "from": 30000,  "term_ru": "5–7 дней",     "term_en": "5–7 days" },
+    { "key": "webapp",    "ru": "Веб-приложение / личный кабинет",       "en": "Web app / personal cabinet",   "from": 200000, "term_ru": "по объёму",    "term_en": "depends on scope" },
+    { "key": "3d",        "ru": "3D-визуализация (за сцену)",           "en": "3D visualization (per scene)", "from": 7000,   "term_ru": "по объёму",    "term_en": "depends on scope" },
+    { "key": "motion",    "ru": "Моушн-дизайн (за ролик)",              "en": "Motion design (per reel)",     "from": 20000,  "term_ru": "по объёму",    "term_en": "depends on scope" },
+    { "key": "branding",  "ru": "Брендинг (логотип + фирменный стиль)", "en": "Branding (logo + identity)",   "from": 50000,  "term_ru": "по объёму",    "term_en": "depends on scope" },
+    { "key": "consult",   "ru": "Первичная консультация",               "en": "First consultation",           "from": 0,      "term_ru": "бесплатно",    "term_en": "free" }
+  ]
+}

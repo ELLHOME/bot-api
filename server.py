@@ -76,11 +76,23 @@ if extra:
 # EN: knowledge base (RAG) — facts next to the script
 KNOWLEDGE = open(os.path.join(os.path.dirname(__file__), "knowledge.txt"), encoding="utf-8").read()
 
+# Структурированный прайс — единственный источник правды по ценам (инструмент get_price)
+SERVICES = json.load(open(os.path.join(os.path.dirname(__file__), "services.json"), encoding="utf-8"))
+
 LEADS_FILE = os.path.join(os.path.dirname(__file__), "leads.json")
 DATABASE_URL = os.getenv("DATABASE_URL")  # задаётся хостингом при подключении Postgres
 
 
 # ── Вызов модели / Model call ────────────────────────────────────────
+def _gemini_client():
+    """Клиент Gemini через OpenAI-совместимый endpoint (нужен и обычному вызову, и агенту)."""
+    from openai import OpenAI
+    key = os.getenv("GOOGLE_API_KEY")
+    if not key or "..." in key:
+        return None
+    return OpenAI(api_key=key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+
+
 def call_model(messages: list[dict], temperature: float | None = None) -> str:
     try:
         if PROVIDER == "ollama":
@@ -135,7 +147,7 @@ def classify(message: str) -> str:
 
 
 # ── TOOL CALLING — сохранить заявку / save the request ───────────────
-def _save_lead_to_file(name: str, service: str) -> int:
+def _save_lead_to_file(name: str, service: str, contact: str = "") -> int:
     leads = []
     if os.path.exists(LEADS_FILE):
         try:
@@ -145,13 +157,14 @@ def _save_lead_to_file(name: str, service: str) -> int:
     leads.append({
         "name": name,
         "service": service,
+        "contact": contact,
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
     })
     json.dump(leads, open(LEADS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     return len(leads)
 
 
-def _save_lead_to_db(name: str, service: str) -> int:
+def _save_lead_to_db(name: str, service: str, contact: str = "") -> int:
     import psycopg2
     # connect_timeout — чтобы недоступная база падала быстро (5с), а не висела минутами
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
@@ -162,7 +175,12 @@ def _save_lead_to_db(name: str, service: str) -> int:
                 "id SERIAL PRIMARY KEY, name TEXT, service TEXT, "
                 "created_at TIMESTAMP DEFAULT NOW())"
             )
-            cur.execute("INSERT INTO leads (name, service) VALUES (%s, %s)", (name, service))
+            # безопасная миграция: добавляем колонку контакта, если её ещё нет
+            cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact TEXT")
+            cur.execute(
+                "INSERT INTO leads (name, service, contact) VALUES (%s, %s, %s)",
+                (name, service, contact),
+            )
             cur.execute("SELECT COUNT(*) FROM leads")
             total = cur.fetchone()[0]
         return total
@@ -170,17 +188,17 @@ def _save_lead_to_db(name: str, service: str) -> int:
         conn.close()
 
 
-def record_lead(name: str, service: str) -> int:
+def record_lead(name: str, service: str, contact: str = "") -> int:
     # RU: сначала пробуем базу (если задана); при любой ошибке — не роняем чат,
     #     а откатываемся на файл. EN: try DB first, fall back to file on any error.
     if DATABASE_URL:
         try:
-            total = _save_lead_to_db(name, service)
+            total = _save_lead_to_db(name, service, contact)
             print(f"📒 [CRM] Новая заявка → Postgres: {name} — {service} (всего: {total})")
             return total
         except Exception as e:
             print(f"⚠️ Postgres недоступен ({e}); пишу заявку в файл.")
-    total = _save_lead_to_file(name, service)
+    total = _save_lead_to_file(name, service, contact)
     print(f"📒 [CRM] Новая заявка → leads.json: {name} — {service} (всего: {total})")
     return total
 
@@ -210,13 +228,128 @@ def judge(question: str, answer: str) -> bool:
     return first.startswith("ДА") or first.startswith("YES")
 
 
+
+# ── ИНСТРУМЕНТЫ АГЕНТА (белый список — никакого шелла и файлов) ──────
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_services",
+        "description": "Полный список услуг ELLHOME с ценами «от» и сроками. Вызывай, когда спрашивают, что вы умеете, или просят прайс целиком.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "get_price",
+        "description": "Точная цена и срок по одной услуге. ВСЕГДА вызывай перед тем, как назвать цену — не придумывай цифры сам.",
+        "parameters": {"type": "object", "properties": {
+            "service": {"type": "string", "description": "Ключ или название услуги: landing, corporate, shop, bot, webapp, 3d, motion, branding, consult"}
+        }, "required": ["service"]},
+    }},
+    {"type": "function", "function": {
+        "name": "save_lead",
+        "description": "Записать заявку клиента в CRM. Вызывай, когда известны имя и суть задачи. Контакт (телеграм/почта/телефон) передавай, если человек его назвал.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Имя клиента"},
+            "task": {"type": "string", "description": "Что нужно сделать"},
+            "contact": {"type": "string", "description": "Телеграм, почта или телефон, если назван"},
+        }, "required": ["name", "task"]},
+    }},
+]
+
+
+def execute_tool(name: str, args: dict) -> dict:
+    """Исполняем инструмент. Всё строго ограничено — только эти три действия."""
+    if name == "list_services":
+        return {
+            "currency": SERVICES.get("currency"),
+            "terms": SERVICES.get("terms_ru"),
+            "services": [
+                {"key": x["key"], "name": x["ru"], "from": x["from"], "term": x["term_ru"]}
+                for x in SERVICES["services"]
+            ],
+        }
+
+    if name == "get_price":
+        q = str(args.get("service", "")).strip().lower()
+        for x in SERVICES["services"]:
+            if q and (q == x["key"] or q in x["ru"].lower() or q in x["en"].lower()):
+                return {"name": x["ru"], "from": x["from"], "currency": SERVICES["currency"],
+                        "term": x["term_ru"], "terms": SERVICES["terms_ru"]}
+        return {"error": "услуга не найдена",
+                "available": [x["key"] for x in SERVICES["services"]]}
+
+    if name == "save_lead":
+        nm = str(args.get("name", "")).strip()[:120]
+        task = str(args.get("task", "")).strip()[:400]
+        contact = str(args.get("contact", "")).strip()[:200]
+        if not nm or not task:
+            return {"ok": False, "error": "нужны имя и описание задачи"}
+        total = record_lead(nm, task, contact)
+        return {"ok": True, "saved": {"name": nm, "task": task, "contact": contact}, "total": total}
+
+    return {"error": f"неизвестный инструмент: {name}"}
+
+
+MAX_STEPS = 4   # предохранитель от зацикливания
+
+
+def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
+    """Модель сама решает, какие инструменты дёрнуть; сервер исполняет и возвращает результат."""
+    if PROVIDER != "gemini":
+        return call_model(messages), []          # локально на ollama — без инструментов
+    client = _gemini_client()
+    if client is None:
+        return call_model(messages), []
+
+    msgs, used = list(messages), []
+    try:
+        for _ in range(MAX_STEPS):
+            resp = client.chat.completions.create(
+                model=GEMINI_MODEL, messages=msgs, tools=TOOLS, tool_choice="auto"
+            )
+            m = resp.choices[0].message
+            calls = getattr(m, "tool_calls", None)
+            if not calls:
+                return (m.content or ""), used
+
+            msgs.append({
+                "role": "assistant",
+                "content": m.content or "",
+                "tool_calls": [
+                    {"id": c.id, "type": "function",
+                     "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                    for c in calls
+                ],
+            })
+            for c in calls:
+                try:
+                    args = json.loads(c.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                result = execute_tool(c.function.name, args)
+                used.append(c.function.name)
+                print(f"🔧 [tool] {c.function.name}({args}) -> {result}")
+                msgs.append({"role": "tool", "tool_call_id": c.id,
+                             "content": json.dumps(result, ensure_ascii=False)})
+
+        final = client.chat.completions.create(model=GEMINI_MODEL, messages=msgs)
+        return (final.choices[0].message.content or ""), used
+    except Exception as e:
+        print("⚠️ agent_loop:", e)
+        return call_model(messages), used
+
+
 # ── РЕЖИМ 1: КОНСУЛЬТАНТ (по базе знаний) ────────────────────────────
 SYSTEM_CONSULT = (
     "Ты — вежливый AI-консультант студии цифровых продуктов ELLHOME. "
     "ВАЖНОЕ ПРАВИЛО: всегда отвечай СТРОГО на языке последнего сообщения клиента. "
     "Английский вопрос — английский ответ. Русский вопрос — русский ответ. "
     "Отвечай ТОЛЬКО по фактам ниже; если факта нет — честно скажи и предложи "
-    "оставить заявку. Будь краток, дружелюбен и по делу.\n\nФАКТЫ:\n" + KNOWLEDGE
+    "оставить заявку. Будь краток, дружелюбен и по делу.\n\n"
+    "У ТЕБЯ ЕСТЬ ИНСТРУМЕНТЫ, пользуйся ими:\n"
+    "— НИКОГДА не называй цену или срок по памяти: сначала вызови get_price "
+    "(или list_services, если просят прайс целиком) и отвечай по его результату.\n"
+    "— Когда клиент готов оставить заявку и назвал имя и суть задачи — вызови save_lead. "
+    "Если контакт не назван, сначала вежливо попроси телеграм или почту, потом сохраняй.\n"
+    "— Не выдумывай услуг, которых нет в прайсе.\n\nФАКТЫ:\n" + KNOWLEDGE
 )
 
 # ── РЕЖИМ 2: ЛАБОРАТОРИЯ (идеи и нейминг) ────────────────────────────
@@ -274,48 +407,35 @@ LAB_POLISH = os.getenv("LAB_POLISH", "true").lower() == "true"
 
 
 def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
-    """Одно сообщение → ответ. Router определяет тему и при необходимости меняет режим."""
+    """Router выбирает режим. Деловой режим — агент с инструментами, Лаборатория — творчество."""
     category = classify(message)
-
-    # Router может переключить режим: попросили название/идею — уходим в «Лабораторию»,
-    # спросили про цену/заказ — возвращаемся к «Консультанту». «Общее» режим не меняет.
     mode = CATEGORY_MODE.get(category, mode if mode in ("consult", "lab") else "consult")
+
+    hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
+    tools_used: list[str] = []
 
     if mode == "lab":
         system = SYSTEM_LAB + LAB_TASK.get(category, LAB_TASK["общее"])
-        temperature = LAB_TEMP
+        messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
+        answer = call_model(messages, temperature=LAB_TEMP)
+        if LAB_POLISH and not answer.startswith("⚠️"):
+            polished = ask(POLISH_PROMPT + answer, system=SYSTEM_LAB, temperature=LAB_TEMP)
+            if polished and not polished.startswith("⚠️"):
+                answer = polished
     else:
         system = SYSTEM_CONSULT
-        temperature = None
-        if category == "цена":
-            system += "\n\nВопрос про стоимость/сроки. Назови ориентир из фактов и уточни, что точная смета — после короткого брифа."
-        if category == "заявка":
-            system += "\n\nКлиент хочет оставить заявку. Если не хватает имени или описания задачи — вежливо уточни."
+        messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
+        answer, tools_used = agent_loop(messages)     # модель сама решает про инструменты
+        if USE_JUDGE and not judge(message, answer):
+            answer = ask(f"Перепиши вежливее и по делу:\n{answer}", system=system)
 
-    # Memory — история приходит от виджета
-    hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
-    messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
-    answer = call_model(messages, temperature=temperature)
-
-    # Tool Calling — заявки собираем только в режиме консультанта
-    lead = None
-    if mode == "consult" and category == "заявка":
-        data = extract_booking(message)
-        if data.get("name") and data.get("service"):
-            record_lead(data["name"], data["service"])
-            lead = data
-            answer += f"\n\n✅ Готово! Записал заявку: {data['name']} — {data['service']}. Скоро свяжусь: Telegram @M_B_lab."
-
-    # «Судья остроумия» — второй проход только для Лаборатории
-    if mode == "lab" and LAB_POLISH and not answer.startswith("⚠️"):
-        polished = ask(POLISH_PROMPT + answer, system=SYSTEM_LAB, temperature=LAB_TEMP)
-        if polished and not polished.startswith("⚠️"):
-            answer = polished
-
-    if mode == "consult" and USE_JUDGE and not judge(message, answer):
-        answer = ask(f"Перепиши вежливее и по делу:\n{answer}", system=system)
-
-    return {"reply": answer, "category": category, "lead": lead, "mode": mode}
+    return {
+        "reply": answer,
+        "category": category,
+        "mode": mode,
+        "lead": {"saved": True} if "save_lead" in tools_used else None,
+        "tools": tools_used,
+    }
 
 
 # ── HTTP API ─────────────────────────────────────────────────────────
