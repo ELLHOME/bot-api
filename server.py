@@ -131,13 +131,17 @@ def _save_lead_to_db(name: str, service: str) -> int:
 
 
 def record_lead(name: str, service: str) -> int:
+    # RU: сначала пробуем базу (если задана); при любой ошибке — не роняем чат,
+    #     а откатываемся на файл. EN: try DB first, fall back to file on any error.
     if DATABASE_URL:
-        total = _save_lead_to_db(name, service)
-        where = "Postgres"
-    else:
-        total = _save_lead_to_file(name, service)
-        where = "leads.json"
-    print(f"📒 [CRM] Новая заявка: {name} — {service} (хранилище: {where}; всего: {total})")
+        try:
+            total = _save_lead_to_db(name, service)
+            print(f"📒 [CRM] Новая заявка → Postgres: {name} — {service} (всего: {total})")
+            return total
+        except Exception as e:
+            print(f"⚠️ Postgres недоступен ({e}); пишу заявку в файл.")
+    total = _save_lead_to_file(name, service)
+    print(f"📒 [CRM] Новая заявка → leads.json: {name} — {service} (всего: {total})")
     return total
 
 
@@ -237,11 +241,9 @@ def chat_endpoint(body: ChatIn):
         return run_chat(body.message, history)
     except Exception:
         import traceback
-        tb = traceback.format_exc()
-        print("CHAT ERROR:\n", tb)  # виден в логах Render
+        traceback.print_exc()  # виден в логах Render
         return {
             "reply": "⚠️ Небольшая техническая заминка. Попробуйте ещё раз или напишите в Telegram @M_B_lab.",
             "category": "error",
             "lead": None,
-            "debug": tb,  # временно: помогает найти причину; уберём после отладки
         }
