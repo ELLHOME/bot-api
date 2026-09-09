@@ -125,18 +125,22 @@ def ask(prompt: str, system: str = "Ты — помощник.", temperature: fl
 
 
 # ── ROUTER — один вызов определяет и тему, и режим ───────────────────
-CATEGORIES = ("цена", "заявка", "название", "идея", "общее")
+CATEGORIES = ("цена", "заявка", "название", "идея", "статья", "гадание", "общее")
 # какая категория к какому режиму относится ("общее" — остаётся в текущем)
-CATEGORY_MODE = {"цена": "consult", "заявка": "consult", "название": "lab", "идея": "lab"}
+CATEGORY_MODE = {"цена": "consult", "заявка": "consult",
+                 "название": "lab", "идея": "lab",
+                 "статья": "guide", "гадание": "guide"}
 
 
 def classify(message: str) -> str:
     cat = ask(
-        "Определи тип сообщения ОДНИМ словом из списка: цена, заявка, название, идея, общее.\n"
+        "Определи тип сообщения ОДНИМ словом из списка: цена, заявка, название, идея, статья, гадание, общее.\n"
         "«цена» — сколько стоит, сроки, смета.\n"
         "«заявка» — хочет заказать, оставить контакт, начать проект.\n"
         "«название» — просит придумать имя, нейм, слоган для проекта/бренда/продукта.\n"
         "«идея» — просит придумать идею продукта, фичи, концепцию.\n"
+        "«статья» — просит рассказать/объяснить, что такое что-то, справку о предмете или явлении.\n"
+        "«гадание» — просит погадать, предсказать, «книга/энциклопедия, ответь», спрашивает о судьбе.\n"
         "«общее» — всё остальное.\n"
         f"Верни только слово.\n\nСообщение: {message}"
     ).strip().lower()
@@ -229,6 +233,63 @@ def judge(question: str, answer: str) -> bool:
 
 
 
+
+# ── ИНСТРУМЕНТЫ «ПУТЕВОДИТЕЛЯ» — открытый API Википедии ──────────────
+# Домен зафиксирован, запросы только на чтение, с таймаутом и лимитом размера.
+WIKI_API = "https://ru.wikipedia.org"
+WIKI_TIMEOUT = 8
+WIKI_UA = "ELLHOME-bot/1.0 (https://ellhome.github.io/Mikhail.Borgoyakov)"
+
+
+def _wiki_get(url: str) -> dict:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=WIKI_TIMEOUT) as r:
+        return json.loads(r.read(300_000).decode("utf-8"))
+
+
+def _wiki_summary(payload: dict) -> dict:
+    return {
+        "title": payload.get("title", ""),
+        "extract": (payload.get("extract") or "")[:1200],
+        "url": (payload.get("content_urls", {}).get("desktop", {}) or {}).get("page", ""),
+    }
+
+
+def wiki_random() -> dict:
+    """Случайная статья — для гадания."""
+    return _wiki_summary(_wiki_get(f"{WIKI_API}/api/rest_v1/page/random/summary"))
+
+
+def wiki_lookup(topic: str) -> dict:
+    """Статья по теме: сначала ищем точное название, потом берём выжимку."""
+    import urllib.parse
+    q = urllib.parse.quote(topic[:120])
+    found = _wiki_get(
+        f"{WIKI_API}/w/api.php?action=query&list=search&srsearch={q}&srlimit=1&format=json"
+    )
+    hits = found.get("query", {}).get("search", [])
+    if not hits:
+        return {"error": "ничего не найдено", "topic": topic}
+    title = urllib.parse.quote(hits[0]["title"].replace(" ", "_"))
+    return _wiki_summary(_wiki_get(f"{WIKI_API}/api/rest_v1/page/summary/{title}"))
+
+
+TOOLS_GUIDE = [
+    {"type": "function", "function": {
+        "name": "wiki_random",
+        "description": "Случайная статья энциклопедии. Вызывай для гадания — выпавшая статья и есть ответ.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "wiki_lookup",
+        "description": "Найти статью энциклопедии по теме. Вызывай, когда просят рассказать о чём-то конкретном. Факты бери только отсюда.",
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string", "description": "Тема или название статьи"}
+        }, "required": ["topic"]},
+    }},
+]
+
 # ── ИНСТРУМЕНТЫ АГЕНТА (белый список — никакого шелла и файлов) ──────
 TOOLS = [
     {"type": "function", "function": {
@@ -285,6 +346,18 @@ def execute_tool(name: str, args: dict) -> dict:
         total = record_lead(nm, task, contact)
         return {"ok": True, "saved": {"name": nm, "task": task, "contact": contact}, "total": total}
 
+    if name == "wiki_random":
+        try:
+            return wiki_random()
+        except Exception as e:
+            return {"error": f"энциклопедия не отвечает: {e}"}
+
+    if name == "wiki_lookup":
+        try:
+            return wiki_lookup(str(args.get("topic", "")).strip())
+        except Exception as e:
+            return {"error": f"энциклопедия не отвечает: {e}"}
+
     return {"error": f"неизвестный инструмент: {name}"}
 
 
@@ -292,7 +365,7 @@ MAX_STEPS = 4   # предохранитель от зацикливания
 LAST_AGENT_ERROR = ""   # временно: чтобы увидеть причину сбоя в ответе API
 
 
-def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
+def agent_loop(messages: list[dict], tools: list | None = None) -> tuple[str, list[str]]:
     """
     Агентский цикл. Модель сама решает, какие инструменты дёрнуть; сервер исполняет
     и подмешивает результаты в контекст следующего захода.
@@ -309,6 +382,7 @@ def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
     if client is None:
         return call_model(messages), []
 
+    tools = tools if tools is not None else TOOLS
     used: list[str] = []
     results: list[str] = []
     done: dict[str, str] = {}                    # кэш: один и тот же вызов не повторяем
@@ -326,7 +400,7 @@ def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
         for _ in range(MAX_STEPS):
             resp = client.chat.completions.create(
                 model=GEMINI_MODEL, messages=with_results(messages),
-                tools=TOOLS, tool_choice="auto",
+                tools=tools, tool_choice="auto",
             )
             m = resp.choices[0].message
             calls = getattr(m, "tool_calls", None)
@@ -441,15 +515,56 @@ LAB_TEMP = float(os.getenv("LAB_TEMP", "1.15"))   # выше температу�
 LAB_POLISH = os.getenv("LAB_POLISH", "true").lower() == "true"
 
 
+
+# ── РЕЖИМ 3: ПУТЕВОДИТЕЛЬ (энциклопедия обо всём) ────────────────────
+SYSTEM_GUIDE = (
+    "Ты — «Путеводитель ELLHOME», справочник обо всём на свете.\n"
+    "Отвечай на языке последнего сообщения собеседника.\n\n"
+    "ГОЛОС: невозмутимый тон энциклопедии, которая абсолютно уверена в себе — "
+    "сообщает факты с каменным лицом, а выводы делает житейские и абсурдные. "
+    "Сухо и коротко. Юмор рождается из контраста серьёзной подачи и нелепого итога. "
+    "Никогда не объясняй шутку и не подмигивай читателю.\n\n"
+    "ЧЕСТНОСТЬ: факты, даты и числа бери ТОЛЬКО из результата инструмента. "
+    "Выдумывать можно исключительно комментарии и выводы, но не сами сведения.\n\n"
+    "ФОРМАТ:\n"
+    "**Название** — одно-два предложения сути по фактам источника.\n"
+    "Затем 2–3 фразы фирменного комментария: неожиданный угол, бытовая аналогия, вывод.\n"
+    "Последняя строка курсивом: «Степень опасности: … Рекомендация: …» — абсурдная, но в тему.\n"
+    "В самом конце — ссылка на источник из инструмента.\n\n"
+    "ЗАПРЕЩЕНО: канцелярит, «в современном мире», восторги, гирлянды эмодзи, "
+    "пересказ статьи целиком, длинные списки, извинения за краткость."
+)
+
+GUIDE_TASK = {
+    "статья": (
+        "\n\nПросят рассказать о чём-то конкретном. Найди тему через wiki_lookup "
+        "и напиши статью по формату выше."
+    ),
+    "гадание": (
+        "\n\nЧеловек гадает. Вызови wiki_random и истолкуй выпавшую статью как ответ "
+        "на его вопрос: сначала торжественно объяви, что выпало, потом дай толкование "
+        "применительно к вопросу — чем неожиданнее связь, тем лучше. "
+        "Если вопрос не назван, сначала попроси задумать его."
+    ),
+    "общее": (
+        "\n\nПоддержи разговор в том же тоне. Если просят справку — используй wiki_lookup, "
+        "если хотят погадать — wiki_random. Про заказы и цены отправляй к «Консультанту»."
+    ),
+}
+
 def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
     """Router выбирает режим. Деловой режим — агент с инструментами, Лаборатория — творчество."""
     category = classify(message)
-    mode = CATEGORY_MODE.get(category, mode if mode in ("consult", "lab") else "consult")
+    mode = CATEGORY_MODE.get(category, mode if mode in ("consult", "lab", "guide") else "consult")
 
     hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
     tools_used: list[str] = []
 
-    if mode == "lab":
+    if mode == "guide":
+        system = SYSTEM_GUIDE + GUIDE_TASK.get(category, GUIDE_TASK["общее"])
+        messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
+        answer, tools_used = agent_loop(messages, TOOLS_GUIDE)
+    elif mode == "lab":
         system = SYSTEM_LAB + LAB_TASK.get(category, LAB_TASK["общее"])
         messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
         answer = call_model(messages, temperature=LAB_TEMP)
@@ -496,7 +611,7 @@ class Msg(BaseModel):
 class ChatIn(BaseModel):
     message: str
     history: list[Msg] = []
-    mode: str = "consult"   # "consult" | "lab"
+    mode: str = "consult"   # "consult" | "lab" | "guide"
 
 
 @app.get("/")
