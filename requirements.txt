@@ -1,0 +1,11 @@
+# Веб-API / web API
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# Модель / model (Gemini через OpenAI-совместимый клиент)
+openai>=1.40
+python-dotenv>=1.0
+
+# Опционально / optional:
+ollama>=0.3           # 🆓 локальная разработка (PROVIDER=ollama)
+psycopg2-binary>=2.9  # 🗄️ Postgres для «долгой памяти» заявок (если задан DATABASE_URL)

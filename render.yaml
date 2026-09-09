@@ -1,0 +1,21 @@
+# Render Blueprint — деплой бэкенда бота как веб-сервиса.
+# Ключ GOOGLE_API_KEY вводится в дашборде Render вручную (sync: false), в git не попадает.
+services:
+  - type: web
+    name: ellhome-bot-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Провайдер модели на сервере
+      - key: PROVIDER
+        value: "gemini"
+      # Ключ Gemini — вводится вручную в дашборде Render
+      - key: GOOGLE_API_KEY
+        sync: false
+      # Опционально — строка подключения Postgres для «долгой памяти» заявок
+      - key: DATABASE_URL
+        sync: false

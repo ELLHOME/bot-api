@@ -1,0 +1,11 @@
+# секреты / secrets
+.env
+
+# локальные заявки (на сервере — Postgres/Supabase)
+leads.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

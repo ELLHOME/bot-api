@@ -1,0 +1,98 @@
+ELLHOME — ФАКТЫ ДЛЯ AI-КОНСУЛЬТАНТА
+(Electronic Life Lab — студия цифровых продуктов Михаила Боргоякова)
+
+О студии:
+ELLHOME — лаборатория цифровых продуктов. Делаем от идеи до запуска: сайты,
+интерфейсы, программное обеспечение, чат-ботов и AI-автоматизацию, 3D и моушн,
+брендинг. Подход — AI-native разработка: один ответственный исполнитель + AI,
+поэтому быстро и под ключ, без потери качества и внимания к деталям.
+
+Услуги и ориентировочные цены (⚠️ примерные — впиши свои реальные):
+- Лендинг (одностраничный сайт) — от 40 000 ₽
+- Корпоративный сайт — от 90 000 ₽
+- Интернет-магазин — от 150 000 ₽
+- Чат-бот / AI-ассистент / автоматизация — от 30 000 ₽
+- Веб-приложение / личный кабинет (SaaS) — от 150 000 ₽
+- 3D-визуализация — от 15 000 ₽ за сцену
+- Моушн-дизайн / анимация — от 20 000 ₽ за ролик
+- Брендинг (логотип + фирменный стиль) — от 50 000 ₽
+- Первичная консультация — бесплатно
+
+Точная стоимость зависит от объёма и сложности — обсуждаем после короткого
+брифа. Чтобы прикинуть смету, лучше оставить заявку.
+
+Сроки (ориентировочно):
+- Лендинг — 1–2 недели
+- Корпоративный сайт — 2–4 недели
+- Чат-бот / автоматизация — от 1 недели
+- Веб-приложение / ПО — по объёму, обсуждается отдельно
+
+Опыт и ниша:
+Силён в технически сложных продуктах, интеграциях, API, платежах и данных.
+Примеры проектов: SmartNet — сервис высокоточного позиционирования с сетью
+GNSS-станций (публичный сайт, личный кабинет, подписки, оплата); Skala — GIS
+для радарного мониторинга деформаций (3D-карты, временные ряды, зоны и тревоги);
+МонТерра — цифровой бренд для геотехнического мониторинга. Отдельная экспертиза —
+геодезия и мониторинг, но берёмся и за другие ниши.
+
+Как работаем:
+Бриф → смета и план → дизайн → разработка → запуск и поддержка. Предоплата 50%,
+работаем по договору. Возможна доработка существующего проекта или разовая
+консультация, не только «под ключ».
+
+Контакты и заявки:
+Telegram: @M_B_lab
+Email: ellhome@yandex.ru
+Сайт/портфолио: ellhome.github.io/Mikhail.Borgoyakov
+Оставить заявку можно прямо здесь, в чате, — попрошу имя и что нужно сделать.
+
+
+En
+ELLHOME — FACTS FOR THE AI CONSULTANT
+(Electronic Life Lab — Mikhail Borgoyakov's digital-products studio)
+
+About:
+ELLHOME is a digital-products lab. We take things from idea to launch: websites,
+interfaces, software, chatbots and AI automation, 3D and motion, branding. The
+approach is AI-native development: a single accountable builder + AI, so it's fast
+and end-to-end, without losing quality or attention to detail.
+
+Services & indicative prices (⚠️ examples — set your real ones):
+- Landing page (one-pager) — from ₽40,000
+- Corporate website — from ₽90,000
+- Online store — from ₽150,000
+- Chatbot / AI assistant / automation — from ₽30,000
+- Web app / personal cabinet (SaaS) — from ₽150,000
+- 3D visualization — from ₽15,000 per scene
+- Motion design / animation — from ₽20,000 per reel
+- Branding (logo + identity) — from ₽50,000
+- First consultation — free
+
+The exact price depends on scope and complexity — discussed after a short brief.
+To get an estimate, it's best to leave a request.
+
+Timelines (approximate):
+- Landing page — 1–2 weeks
+- Corporate website — 2–4 weeks
+- Chatbot / automation — from 1 week
+- Web app / software — depends on scope, discussed separately
+
+Experience & niche:
+Strong at technically complex products, integrations, APIs, payments and data.
+Example projects: SmartNet — a high-precision positioning service with a GNSS
+station network (public site, personal cabinet, subscriptions, payments); Skala —
+a GIS for radar deformation monitoring (3D maps, time series, zones and alarms);
+MonTerra — a digital brand for geotechnical monitoring. Special expertise in
+geodesy and monitoring, but other niches are welcome too.
+
+How we work:
+Brief → estimate and plan → design → development → launch and support. 50% upfront,
+work under a contract. We also do improvements to an existing project or a one-off
+consultation, not only full turnkey builds.
+
+Contacts & requests:
+Telegram: @M_B_lab
+Email: ellhome@yandex.ru
+Site/portfolio: ellhome.github.io/Mikhail.Borgoyakov
+You can leave a request right here in the chat — I'll ask for your name and what
+you need done.
