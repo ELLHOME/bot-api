@@ -114,7 +114,8 @@ def _save_lead_to_file(name: str, service: str) -> int:
 
 def _save_lead_to_db(name: str, service: str) -> int:
     import psycopg2
-    conn = psycopg2.connect(DATABASE_URL)
+    # connect_timeout — чтобы недоступная база падала быстро (5с), а не висела минутами
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
