@@ -256,30 +256,51 @@ def _wiki_summary(payload: dict) -> dict:
     }
 
 
-def wiki_random() -> dict:
-    """Случайная статья — для гадания."""
-    return _wiki_summary(_wiki_get(f"{WIKI_API}/api/rest_v1/page/random/summary"))
-
-
-def wiki_lookup(topic: str) -> dict:
-    """Статья по теме: сначала ищем точное название, потом берём выжимку."""
+def wiki_by_numbers(page: int, line: int) -> dict:
+    """
+    Гадание: числа, названные ЧЕЛОВЕКОМ, — это координаты в энциклопедии.
+    Превращаем их в идентификатор статьи. Одни и те же числа всегда дают
+    одну и ту же статью — выбор делает человек, а не бот.
+    """
     import urllib.parse
-    q = urllib.parse.quote(topic[:120])
-    found = _wiki_get(
-        f"{WIKI_API}/w/api.php?action=query&list=search&srsearch={q}&srlimit=1&format=json"
-    )
-    hits = found.get("query", {}).get("search", [])
-    if not hits:
-        return {"error": "ничего не найдено", "topic": topic}
-    title = urllib.parse.quote(hits[0]["title"].replace(" ", "_"))
-    return _wiki_summary(_wiki_get(f"{WIKI_API}/api/rest_v1/page/summary/{title}"))
+    page, line = abs(int(page)), abs(int(line))
+    # строка тоже заметно сдвигает координату, иначе соседние строки дают одно и то же
+    target = page * 1000 + line * 97 or 1
+
+    # Идентификаторы идут с пропусками, поэтому одним запросом берём «полку»
+    # подряд идущих номеров и выбираем ближайший существующий к загаданному.
+    for attempt in range(3):
+        base = target + attempt * 50
+        ids = "|".join(str(base + i) for i in range(50))
+        url = (f"{WIKI_API}/w/api.php?action=query&pageids={urllib.parse.quote(ids)}"
+               "&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json")
+        pages = _wiki_get(url).get("query", {}).get("pages", {})
+        found = [
+            pg for pg in pages.values()
+            if "missing" not in pg and (pg.get("extract") or "").strip()
+        ]
+        if found:
+            # из найденной «полки» выбираем по числам человека — детерминированно
+            found.sort(key=lambda pg: int(pg["pageid"]))
+            best = found[(page + line) % len(found)]
+            return {
+                "coordinates": f"страница {page}, строка {line}",
+                "title": best.get("title", ""),
+                "extract": (best.get("extract") or "")[:1200],
+                "url": best.get("fullurl", ""),
+            }
+    return {"error": "на этих координатах энциклопедия молчит — попроси назвать другие числа"}
 
 
 TOOLS_GUIDE = [
     {"type": "function", "function": {
-        "name": "wiki_random",
-        "description": "Случайная статья энциклопедии. Вызывай для гадания — выпавшая статья и есть ответ.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "name": "wiki_by_numbers",
+        "description": ("Гадание по энциклопедии. Вызывай ТОЛЬКО когда человек сам назвал "
+                        "номер страницы и номер строки. Никогда не придумывай числа за него."),
+        "parameters": {"type": "object", "properties": {
+            "page": {"type": "integer", "description": "Номер страницы, названный человеком"},
+            "line": {"type": "integer", "description": "Номер строки, названный человеком"},
+        }, "required": ["page", "line"]},
     }},
     {"type": "function", "function": {
         "name": "wiki_lookup",
@@ -346,9 +367,9 @@ def execute_tool(name: str, args: dict) -> dict:
         total = record_lead(nm, task, contact)
         return {"ok": True, "saved": {"name": nm, "task": task, "contact": contact}, "total": total}
 
-    if name == "wiki_random":
+    if name == "wiki_by_numbers":
         try:
-            return wiki_random()
+            return wiki_by_numbers(int(args.get("page", 0)), int(args.get("line", 0)))
         except Exception as e:
             return {"error": f"энциклопедия не отвечает: {e}"}
 
@@ -541,14 +562,16 @@ GUIDE_TASK = {
         "и напиши статью по формату выше."
     ),
     "гадание": (
-        "\n\nЧеловек гадает. Вызови wiki_random и истолкуй выпавшую статью как ответ "
-        "на его вопрос: сначала торжественно объяви, что выпало, потом дай толкование "
-        "применительно к вопросу — чем неожиданнее связь, тем лучше. "
-        "Если вопрос не назван, сначала попроси задумать его."
+        "\n\nЧеловек гадает. РИТУАЛ СВЯЩЕНЕН: числа называет ОН САМ, ты их не выбираешь "
+        "и не предлагаешь. Если страница и строка ещё не названы — попроси задумать вопрос "
+        "и назвать номер страницы и номер строки, и НИЧЕГО не вызывай. "
+        "Когда числа названы — вызови wiki_by_numbers с ними и истолкуй найденное: "
+        "сначала торжественно объяви координаты и что на них обнаружено, "
+        "потом дай толкование применительно к вопросу — чем неожиданнее связь, тем лучше."
     ),
     "общее": (
         "\n\nПоддержи разговор в том же тоне. Если просят справку — используй wiki_lookup, "
-        "если хотят погадать — wiki_random. Про заказы и цены отправляй к «Консультанту»."
+        "если хотят погадать — попроси назвать страницу и строку. Про заказы и цены отправляй к «Консультанту»."
     ),
 }
 
