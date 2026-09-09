@@ -13,6 +13,7 @@ widget on the site can call it. The model key lives ONLY here, on the server.
 """
 
 import os
+import re
 import json
 import time
 import datetime
@@ -596,6 +597,22 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
 
     hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
     tools_used: list[str] = []
+
+    # Шаги обряда ведём кодом, а не промптом: пока не названы два числа,
+    # отвечаем короткой фразой сами — модель тут только мешает (любит формат статьи).
+    if mode == "guide" and category == "гадание" and len(re.findall(r"\d+", message)) < 2:
+        ru = any("\u0400" <= ch <= "\u04ff" for ch in message)
+        stop = {"погадай", "погадать", "гадание", "гадай", "divine", "divination"}
+        words = [w for w in re.sub(r"[^\w\s]", " ", message.lower()).split() if w not in stop]
+        if len(words) < 2:
+            reply = ("Напишите свой вопрос — а следом назовите номер страницы и номер строки."
+                     if ru else
+                     "Write your question — then name a page number and a line number.")
+        else:
+            reply = ("Вопрос принят. Теперь назовите номер страницы и номер строки."
+                     if ru else
+                     "Question received. Now name a page number and a line number.")
+        return {"reply": reply, "category": category, "mode": mode, "lead": None, "tools": []}
 
     if mode == "guide":
         system = SYSTEM_GUIDE + GUIDE_TASK.get(category, GUIDE_TASK["общее"])
