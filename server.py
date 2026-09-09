@@ -470,7 +470,6 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
 
     return {
         "reply": answer,
-        "debug": LAST_AGENT_ERROR or None,   # временно, для отладки
         "category": category,
         "mode": mode,
         "lead": {"saved": True} if "save_lead" in tools_used else None,
