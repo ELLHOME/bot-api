@@ -27,7 +27,7 @@ load_dotenv()
 # PROVIDER: "gemini" (облако, для деплоя) | "ollama" (локально, бесплатно)
 PROVIDER = os.getenv("PROVIDER", "gemini").lower()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "muse-glimmer")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 USE_JUDGE = os.getenv("USE_JUDGE", "false").lower() == "true"
 
 # RU: домены, которым разрешено обращаться к API (CORS). Добавь свой прод-домен.
