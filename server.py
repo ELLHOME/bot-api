@@ -232,5 +232,16 @@ def health():
 
 @app.post("/chat")
 def chat_endpoint(body: ChatIn):
-    history = [m.model_dump() for m in body.history]
-    return run_chat(body.message, history)
+    try:
+        history = [m.model_dump() for m in body.history]
+        return run_chat(body.message, history)
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        print("CHAT ERROR:\n", tb)  # виден в логах Render
+        return {
+            "reply": "⚠️ Небольшая техническая заминка. Попробуйте ещё раз или напишите в Telegram @M_B_lab.",
+            "category": "error",
+            "lead": None,
+            "debug": tb,  # временно: помогает найти причину; уберём после отладки
+        }
