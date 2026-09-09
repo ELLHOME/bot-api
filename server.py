@@ -574,6 +574,53 @@ GUIDE_TASK = {
     ),
 }
 
+# Толкование пишет модель, но координаты и ссылку подставляет код —
+# так они не теряются и не выдумываются.
+GUIDE_INTERPRET = (
+    "\n\nСтатья УЖЕ выпала — искать и выбирать ничего не нужно. "
+    "Координаты и ссылку на источник подставит система, твоя задача — ТОЛЬКО толкование.\n"
+    "Пиши ровно так, без заголовков и без списков:\n"
+    "Абзац 1 — одно-два предложения о том, что это такое, строго по фактам источника.\n"
+    "Абзац 2 — 2–3 сухие фразы: как это отвечает на вопрос человека. "
+    "Чем неожиданнее связь, тем лучше.\n"
+    "Абзац 3 — одна строка курсивом между звёздочками: "
+    "*Степень опасности: … Рекомендация: …* — абсурдная, но в тему.\n"
+    "НЕ повторяй координаты, НЕ пиши название статьи отдельной строкой, "
+    "НЕ вставляй ссылок и адресов — всё это добавит система.\n"
+    "ЗАПРЕЩЕНО: вступления, нумерованные списки, мотивационные концовки, "
+    "слова «символизм», «трансформация», «энергия», «вселенная», «неслучайно»."
+)
+
+
+def _strip_guide_noise(text: str) -> str:
+    """Убираем то, что модель дублирует: шапку с названием, ссылки, адреса."""
+    t = (text or "").strip()
+    t = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", t)   # markdown-ссылки
+    t = re.sub(r"https?://\S+", "", t)                          # голые адреса
+    lines = [l for l in t.split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    # первая строка вида «**Что-то**» или «страница 12, строка 3 → …» — это наша шапка
+    if lines:
+        head = lines[0].strip()
+        if re.fullmatch(r"\*\*[^*]{1,80}\*\*[.:]?", head) or re.match(
+            r"^(страница|page)\s*\d+", head, re.I
+        ):
+            lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _guide_question(hist: list[dict], message: str) -> str:
+    """Вопрос человека — последняя его реплика, где есть слова, а не только числа."""
+    for m in reversed(hist):
+        if m.get("role") != "user":
+            continue
+        text = str(m.get("content", "")).strip()
+        if len(re.sub(r"[\d\s.,;:!?-]", "", text)) >= 3:
+            return text
+    return message
+
+
 def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
     """Router выбирает режим. Деловой режим — агент с инструментами, Лаборатория — творчество."""
     category = classify(message)
@@ -603,6 +650,46 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
                      if ru else
                      "Question received. Now name a page number and a line number.")
         return {"reply": reply, "category": category, "mode": mode, "lead": None, "tools": []}
+
+    # Гадание с числами ведём кодом: сами ходим в энциклопедию, сами ставим
+    # шапку с координатами и ссылку. Модели остаётся только толкование —
+    # иначе она то теряет координаты, то придумывает адрес источника.
+    if mode == "guide" and category == "гадание":
+        nums = [int(n) for n in re.findall(r"\d+", message)[:2]]
+        ru = any("\u0400" <= ch <= "\u04ff" for ch in message + " ".join(
+            str(m.get("content", "")) for m in hist))
+        try:
+            found = wiki_by_numbers(nums[0], nums[1])
+        except Exception as e:                      # энциклопедия недоступна
+            found = {"error": str(e)}
+        tools_used = ["wiki_by_numbers"]
+        if found.get("error") or not found.get("title"):
+            reply = ("На этих координатах энциклопедия молчит. Назовите другие числа."
+                     if ru else
+                     "The encyclopedia is silent at those coordinates. Name other numbers.")
+            return {"reply": reply, "category": category, "mode": mode,
+                    "lead": None, "tools": tools_used}
+
+        question = _guide_question(hist, message)
+        system = SYSTEM_GUIDE + GUIDE_INTERPRET
+        ctx = (f"ВОПРОС ЧЕЛОВЕКА: {question}\n\n"
+               f"ЧТО ВЫПАЛО: {found['title']}\n"
+               f"ФАКТЫ ИЗ ИСТОЧНИКА (только они, ничего не додумывай):\n{found['extract']}")
+        body = _strip_guide_noise(call_model(
+            [{"role": "system", "content": system}, {"role": "user", "content": ctx}],
+            temperature=LAB_TEMP,
+        ))
+        if not body or body.startswith("⚠️"):
+            body = (found["extract"] or "").strip()[:400]
+
+        coords = (f"страница {nums[0]}, строка {nums[1]}" if ru
+                  else f"page {nums[0]}, line {nums[1]}")
+        answer = f"**{coords} → {found['title']}**\n\n{body}"
+        if found.get("url"):
+            label = "Статья целиком" if ru else "Full article"
+            answer += f"\n\n[{label}]({found['url']})"
+        return {"reply": answer, "category": category, "mode": mode,
+                "lead": None, "tools": tools_used}
 
     if mode == "guide":
         system = SYSTEM_GUIDE + GUIDE_TASK.get(category, GUIDE_TASK["гадание"])
