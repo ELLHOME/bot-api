@@ -595,7 +595,13 @@ GUIDE_TASK = {
 def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
     """Router выбирает режим. Деловой режим — агент с инструментами, Лаборатория — творчество."""
     category = classify(message)
-    mode = CATEGORY_MODE.get(category, mode if mode in ("consult", "lab", "guide") else "consult")
+    requested = mode if mode in ("consult", "lab", "guide") else "consult"
+    mode = CATEGORY_MODE.get(category, requested)
+
+    # На вкладке гадания любой обычный вопрос — это вопрос к оракулу, а не болтовня.
+    # Без этого «стоит ли менять работу?» уезжало в «общее», и ритуал не начинался.
+    if requested == "guide" and mode == "guide" and category == "общее":
+        category = "гадание"
 
     hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
     tools_used: list[str] = []
