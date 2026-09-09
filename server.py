@@ -98,7 +98,7 @@ def call_model(messages: list[dict], temperature: float | None = None) -> str:
         if PROVIDER == "ollama":
             import ollama  # RU: ленивый импорт — на сервере ollama не нужен
             opts = {"temperature": temperature} if temperature is not None else None
-            return ollama.chat(model=OLLAMA_MODEL, messages=messages, options=opts).message.content
+            return (ollama.chat(model=OLLAMA_MODEL, messages=messages, options=opts).message.content or "")
 
         # cloud — Gemini через OpenAI-совместимый endpoint
         from openai import OpenAI
@@ -110,9 +110,9 @@ def call_model(messages: list[dict], temperature: float | None = None) -> str:
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         kw = {"temperature": temperature} if temperature is not None else {}
-        return client.chat.completions.create(
+        return (client.chat.completions.create(
             model=GEMINI_MODEL, messages=messages, **kw
-        ).choices[0].message.content
+        ).choices[0].message.content or "")
     except Exception as e:
         return f"⚠️ Модель не отвечает (PROVIDER={PROVIDER}): {e}"
 
@@ -289,6 +289,7 @@ def execute_tool(name: str, args: dict) -> dict:
 
 
 MAX_STEPS = 4   # предохранитель от зацикливания
+LAST_AGENT_ERROR = ""   # временно: чтобы увидеть причину сбоя в ответе API
 
 
 def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
@@ -299,6 +300,8 @@ def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
     if client is None:
         return call_model(messages), []
 
+    global LAST_AGENT_ERROR
+    LAST_AGENT_ERROR = ""
     msgs, used = list(messages), []
     try:
         for _ in range(MAX_STEPS):
@@ -312,7 +315,7 @@ def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
 
             msgs.append({
                 "role": "assistant",
-                "content": m.content or "",
+                "content": m.content if m.content else None,
                 "tool_calls": [
                     {"id": c.id, "type": "function",
                      "function": {"name": c.function.name, "arguments": c.function.arguments}}
@@ -333,8 +336,15 @@ def agent_loop(messages: list[dict]) -> tuple[str, list[str]]:
         final = client.chat.completions.create(model=GEMINI_MODEL, messages=msgs)
         return (final.choices[0].message.content or ""), used
     except Exception as e:
-        print("⚠️ agent_loop:", e)
-        return call_model(messages), used
+        import traceback
+        LAST_AGENT_ERROR = f"{type(e).__name__}: {e}"
+        traceback.print_exc()
+        # запасной путь: обычный ответ без инструментов
+        fallback = call_model(messages)
+        if not (fallback or "").strip():
+            fallback = ("Сейчас не могу свериться с прайсом — напишите, пожалуйста, "
+                        "в Telegram @M_B_lab, отвечу лично.")
+        return fallback, used
 
 
 # ── РЕЖИМ 1: КОНСУЛЬТАНТ (по базе знаний) ────────────────────────────
@@ -429,8 +439,13 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
         if USE_JUDGE and not judge(message, answer):
             answer = ask(f"Перепиши вежливее и по делу:\n{answer}", system=system)
 
+    if not (answer or "").strip():
+        answer = ("Секунду, что-то пошло не так с ответом. Попробуйте переспросить "
+                  "или напишите в Telegram @M_B_lab.")
+
     return {
         "reply": answer,
+        "debug": LAST_AGENT_ERROR or None,   # временно, для отладки
         "category": category,
         "mode": mode,
         "lead": {"saved": True} if "save_lead" in tools_used else None,
