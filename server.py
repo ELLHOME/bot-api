@@ -14,9 +14,10 @@ widget on the site can call it. The model key lives ONLY here, on the server.
 
 import os
 import json
+import time
 import datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -29,6 +30,34 @@ PROVIDER = os.getenv("PROVIDER", "gemini").lower()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "muse-glimmer")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 USE_JUDGE = os.getenv("USE_JUDGE", "false").lower() == "true"
+
+# ── Лимиты (защита от спама и от лишних трат) ────────────────────────
+RATE_WINDOW = int(os.getenv("RATE_WINDOW", "600"))   # окно, сек (10 мин)
+RATE_MAX = int(os.getenv("RATE_MAX", "15"))          # сообщений за окно с одного IP
+MAX_MESSAGE_LEN = 1000                                # максимум символов в сообщении
+MAX_HISTORY = 20                                      # сколько последних реплик шлём модели
+_hits: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")   # за прокси Render
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_ok(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _hits.get(ip, []) if now - t < RATE_WINDOW]
+    if len(hits) >= RATE_MAX:
+        _hits[ip] = hits
+        return False
+    hits.append(now)
+    _hits[ip] = hits
+    if len(_hits) > 500:   # лёгкая уборка старых записей
+        for k in [k for k, v in _hits.items() if not any(now - t < RATE_WINDOW for t in v)]:
+            _hits.pop(k, None)
+    return True
 
 # RU: домены, которым разрешено обращаться к API (CORS). Добавь свой прод-домен.
 # EN: origins allowed to call the API (CORS). Add your production domain.
@@ -236,10 +265,26 @@ def health():
 
 
 @app.post("/chat")
-def chat_endpoint(body: ChatIn):
+def chat_endpoint(body: ChatIn, request: Request):
+    message = (body.message or "").strip()[:MAX_MESSAGE_LEN]
+    if not message:
+        return {"reply": "", "category": "empty", "lead": None}
+
+    if not _rate_ok(_client_ip(request)):
+        ru = any("\u0400" <= ch <= "\u04ff" for ch in message)
+        return {
+            "reply": ("Слишком много сообщений подряд — попробуйте, пожалуйста, через несколько минут. "
+                      "Если вопрос срочный, напишите в Telegram @M_B_lab."
+                      if ru else
+                      "Too many messages in a row — please try again in a few minutes. "
+                      "If it's urgent, message Telegram @M_B_lab."),
+            "category": "limit",
+            "lead": None,
+        }
+
     try:
-        history = [m.model_dump() for m in body.history]
-        return run_chat(body.message, history)
+        history = [m.model_dump() for m in body.history][-MAX_HISTORY:]
+        return run_chat(message, history)
     except Exception:
         import traceback
         traceback.print_exc()  # виден в логах Render
