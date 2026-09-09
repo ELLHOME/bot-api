@@ -81,11 +81,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")  # задаётся хостингом 
 
 
 # ── Вызов модели / Model call ────────────────────────────────────────
-def call_model(messages: list[dict]) -> str:
+def call_model(messages: list[dict], temperature: float | None = None) -> str:
     try:
         if PROVIDER == "ollama":
             import ollama  # RU: ленивый импорт — на сервере ollama не нужен
-            return ollama.chat(model=OLLAMA_MODEL, messages=messages).message.content
+            opts = {"temperature": temperature} if temperature is not None else None
+            return ollama.chat(model=OLLAMA_MODEL, messages=messages, options=opts).message.content
 
         # cloud — Gemini через OpenAI-совместимый endpoint
         from openai import OpenAI
@@ -96,29 +97,38 @@ def call_model(messages: list[dict]) -> str:
             api_key=key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
+        kw = {"temperature": temperature} if temperature is not None else {}
         return client.chat.completions.create(
-            model=GEMINI_MODEL, messages=messages
+            model=GEMINI_MODEL, messages=messages, **kw
         ).choices[0].message.content
     except Exception as e:
         return f"⚠️ Модель не отвечает (PROVIDER={PROVIDER}): {e}"
 
 
-def ask(prompt: str, system: str = "Ты — помощник.") -> str:
+def ask(prompt: str, system: str = "Ты — помощник.", temperature: float | None = None) -> str:
     return call_model([
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
-    ])
+    ], temperature=temperature)
 
 
-# ── ROUTER ───────────────────────────────────────────────────────────
+# ── ROUTER — один вызов определяет и тему, и режим ───────────────────
+CATEGORIES = ("цена", "заявка", "название", "идея", "общее")
+# какая категория к какому режиму относится ("общее" — остаётся в текущем)
+CATEGORY_MODE = {"цена": "consult", "заявка": "consult", "название": "lab", "идея": "lab"}
+
+
 def classify(message: str) -> str:
     cat = ask(
-        "Определи тип вопроса ОДНИМ словом из списка: цена, заявка, общее. "
-        "«цена» — сколько стоит / сроки / смета. «заявка» — хочет заказать, "
-        "оставить контакт, начать проект. «общее» — всё остальное. "
-        f"Верни только слово.\n\nВопрос: {message}"
+        "Определи тип сообщения ОДНИМ словом из списка: цена, заявка, название, идея, общее.\n"
+        "«цена» — сколько стоит, сроки, смета.\n"
+        "«заявка» — хочет заказать, оставить контакт, начать проект.\n"
+        "«название» — просит придумать имя, нейм, слоган для проекта/бренда/продукта.\n"
+        "«идея» — просит придумать идею продукта, фичи, концепцию.\n"
+        "«общее» — всё остальное.\n"
+        f"Верни только слово.\n\nСообщение: {message}"
     ).strip().lower()
-    for key in ("цена", "заявка", "общее"):
+    for key in CATEGORIES:
         if key in cat:
             return key
     return "общее"
@@ -200,7 +210,8 @@ def judge(question: str, answer: str) -> bool:
     return first.startswith("ДА") or first.startswith("YES")
 
 
-SYSTEM_BASE = (
+# ── РЕЖИМ 1: КОНСУЛЬТАНТ (по базе знаний) ────────────────────────────
+SYSTEM_CONSULT = (
     "Ты — вежливый AI-консультант студии цифровых продуктов ELLHOME. "
     "ВАЖНОЕ ПРАВИЛО: всегда отвечай СТРОГО на языке последнего сообщения клиента. "
     "Английский вопрос — английский ответ. Русский вопрос — русский ответ. "
@@ -208,34 +219,103 @@ SYSTEM_BASE = (
     "оставить заявку. Будь краток, дружелюбен и по делу.\n\nФАКТЫ:\n" + KNOWLEDGE
 )
 
+# ── РЕЖИМ 2: ЛАБОРАТОРИЯ (идеи и нейминг) ────────────────────────────
+# Главная задача промпта — выбить из модели её штампы. Поэтому запреты
+# перечислены буквально: модель хорошо избегает того, что названо явно.
+SYSTEM_LAB = (
+    "Ты — «Лаборатория ELLHOME»: остроумный напарник по идеям и названиям.\n"
+    "Всегда отвечай на языке последнего сообщения собеседника.\n\n"
+    "ТОН: живой и уверенный, юмор взрослого человека, а не корпоративного буклета. "
+    "Коротко. Без вступлений вроде «Отличный вопрос!» и без концовок вроде «Надеюсь, это поможет!».\n\n"
+    "СТРОГО ЗАПРЕЩЕНО (нарушение = провальный ответ):\n"
+    "— названия с кусками: -ify, -ly, -hub, -nova, -sphere, -genix, -mind, Tech, Smart, Neo, "
+    "Digital, Кибер, Умный, Про, Мега, Супер;\n"
+    "— слова-пустышки: Синергия, Импульс, Вектор, Горизонт, Прорыв, Экосистема, Инновация, Платформа;\n"
+    "— слоганы вида «больше чем просто…», «нового поколения», «ваш надёжный партнёр», "
+    "«решение, которое меняет всё»;\n"
+    "— обороты «в современном мире», «в эпоху цифровизации», «динамично развивающийся»;\n"
+    "— вежливая вода, восторги, гирлянды эмодзи, длинные списки банальностей.\n\n"
+    "КАК НАДО: зацепись за конкретную деталь запроса и вытащи из неё неожиданный угол. "
+    "Играй смыслами, звучанием и идиомами языка. Точная шутка лучше громкой. "
+    "Одно меткое попадание ценнее пяти вежливых вариантов."
+)
 
-def run_chat(message: str, history: list[dict]) -> dict:
-    """RU: одно сообщение → ответ. Вся логика бота (Router→RAG→Tool→Judge)."""
+LAB_TASK = {
+    "название": (
+        "\n\nПросят НАЗВАНИЕ. Дай ровно 3 варианта, разных по характеру:\n"
+        "1) короткое и хлёсткое;\n"
+        "2) с каламбуром или двойным дном;\n"
+        "3) дерзкое — которое сначала царапает, а потом нравится.\n"
+        "После каждого — одна короткая строка «почему», тоже с характером. "
+        "Никаких «плюсов и минусов» и рассуждений про целевую аудиторию."
+    ),
+    "идея": (
+        "\n\nПросят ИДЕЮ. Дай ОДНУ идею, не список. Три коротких блока: "
+        "что это (одно предложение), в чём неожиданный поворот, и почему сработает — "
+        "конкретно и с иронией. Идея должна быть выполнима руками, а не фантастика."
+    ),
+    "общее": (
+        "\n\nПоддержи разговор в том же духе: коротко, живо, по делу. "
+        "Если спрашивают про заказ, цены или услуги — скажи, что это к «Консультанту» "
+        "(соседняя вкладка), и предложи переключиться."
+    ),
+}
+
+# Второй проход: вычищаем то, что всё-таки прозвучало по-нейросетевому
+POLISH_PROMPT = (
+    "Ниже черновик ответа. Перепиши его так, чтобы он звучал живо и небанально: "
+    "выкинь всё похожее на типичный текст нейросети (шаблонные названия, канцелярит, "
+    "вежливую воду, восторги, штампы), усиль самое меткое, сократи. "
+    "Сохрани язык и структуру. Верни ТОЛЬКО итоговый текст, без комментариев.\n\nЧерновик:\n"
+)
+
+LAB_TEMP = float(os.getenv("LAB_TEMP", "1.15"))   # выше температура — меньше шаблонов
+LAB_POLISH = os.getenv("LAB_POLISH", "true").lower() == "true"
+
+
+def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
+    """Одно сообщение → ответ. Router определяет тему и при необходимости меняет режим."""
     category = classify(message)
 
-    system = SYSTEM_BASE
-    if category == "цена":
-        system += "\n\nВопрос про стоимость/сроки. Назови ориентир из фактов и уточни, что точная смета — после короткого брифа."
-    if category == "заявка":
-        system += "\n\nКлиент хочет оставить заявку. Если не хватает имени или описания задачи — вежливо уточни."
+    # Router может переключить режим: попросили название/идею — уходим в «Лабораторию»,
+    # спросили про цену/заказ — возвращаемся к «Консультанту». «Общее» режим не меняет.
+    mode = CATEGORY_MODE.get(category, mode if mode in ("consult", "lab") else "consult")
+
+    if mode == "lab":
+        system = SYSTEM_LAB + LAB_TASK.get(category, LAB_TASK["общее"])
+        temperature = LAB_TEMP
+    else:
+        system = SYSTEM_CONSULT
+        temperature = None
+        if category == "цена":
+            system += "\n\nВопрос про стоимость/сроки. Назови ориентир из фактов и уточни, что точная смета — после короткого брифа."
+        if category == "заявка":
+            system += "\n\nКлиент хочет оставить заявку. Если не хватает имени или описания задачи — вежливо уточни."
 
     # Memory — история приходит от виджета
     hist = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in history]
     messages = [{"role": "system", "content": system}] + hist + [{"role": "user", "content": message}]
-    answer = call_model(messages)
+    answer = call_model(messages, temperature=temperature)
 
+    # Tool Calling — заявки собираем только в режиме консультанта
     lead = None
-    if category == "заявка":
+    if mode == "consult" and category == "заявка":
         data = extract_booking(message)
         if data.get("name") and data.get("service"):
             record_lead(data["name"], data["service"])
             lead = data
             answer += f"\n\n✅ Готово! Записал заявку: {data['name']} — {data['service']}. Скоро свяжусь: Telegram @M_B_lab."
 
-    if USE_JUDGE and not judge(message, answer):
+    # «Судья остроумия» — второй проход только для Лаборатории
+    if mode == "lab" and LAB_POLISH and not answer.startswith("⚠️"):
+        polished = ask(POLISH_PROMPT + answer, system=SYSTEM_LAB, temperature=LAB_TEMP)
+        if polished and not polished.startswith("⚠️"):
+            answer = polished
+
+    if mode == "consult" and USE_JUDGE and not judge(message, answer):
         answer = ask(f"Перепиши вежливее и по делу:\n{answer}", system=system)
 
-    return {"reply": answer, "category": category, "lead": lead}
+    return {"reply": answer, "category": category, "lead": lead, "mode": mode}
 
 
 # ── HTTP API ─────────────────────────────────────────────────────────
@@ -257,6 +337,7 @@ class Msg(BaseModel):
 class ChatIn(BaseModel):
     message: str
     history: list[Msg] = []
+    mode: str = "consult"   # "consult" | "lab"
 
 
 @app.get("/")
@@ -268,7 +349,7 @@ def health():
 def chat_endpoint(body: ChatIn, request: Request):
     message = (body.message or "").strip()[:MAX_MESSAGE_LEN]
     if not message:
-        return {"reply": "", "category": "empty", "lead": None}
+        return {"reply": "", "category": "empty", "lead": None, "mode": body.mode}
 
     if not _rate_ok(_client_ip(request)):
         ru = any("\u0400" <= ch <= "\u04ff" for ch in message)
@@ -280,11 +361,12 @@ def chat_endpoint(body: ChatIn, request: Request):
                       "If it's urgent, message Telegram @M_B_lab."),
             "category": "limit",
             "lead": None,
+            "mode": body.mode,
         }
 
     try:
         history = [m.model_dump() for m in body.history][-MAX_HISTORY:]
-        return run_chat(message, history)
+        return run_chat(message, history, body.mode)
     except Exception:
         import traceback
         traceback.print_exc()  # виден в логах Render
@@ -292,4 +374,5 @@ def chat_endpoint(body: ChatIn, request: Request):
             "reply": "⚠️ Небольшая техническая заминка. Попробуйте ещё раз или напишите в Telegram @M_B_lab.",
             "category": "error",
             "lead": None,
+            "mode": body.mode,
         }
