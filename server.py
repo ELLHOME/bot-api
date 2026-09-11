@@ -256,6 +256,16 @@ def _wiki_summary(payload: dict) -> dict:
     }
 
 
+# «Толщина» энциклопедии: идентификаторы статей в ru.wikipedia выданы примерно
+# до этого номера (замерено по свежим статьям). Отсюда и границы в интерфейсе:
+# страница 1–11 500, строка 1–99 — при них координата всегда внутри заселённого
+# пространства. Число сверяем раз в год, оно только растёт.
+WIKI_MAX_ID = 11_600_000
+WIKI_MAX_PAGE = 11_500
+WIKI_MAX_LINE = 99
+WIKI_SHELVES = 6      # сколько «полок» по 50 номеров просматриваем подряд
+
+
 def wiki_by_numbers(page: int, line: int) -> dict:
     """
     Гадание: числа, названные ЧЕЛОВЕКОМ, — это координаты в энциклопедии.
@@ -264,20 +274,25 @@ def wiki_by_numbers(page: int, line: int) -> dict:
     """
     import urllib.parse
     page, line = abs(int(page)), abs(int(line))
-    # строка тоже заметно сдвигает координату, иначе соседние строки дают одно и то же
-    target = page * 1000 + line * 97 or 1
+    # строка тоже заметно сдвигает координату, иначе соседние строки дают одно и то же.
+    # По модулю — чтобы «страница 999999» не упиралась в пустоту за краем
+    # энциклопедии, а завернулась внутрь: тупика не должно быть ни при каком вводе.
+    target = (page * 1000 + line * 97) % WIKI_MAX_ID or 1
 
     # Идентификаторы идут с пропусками, поэтому одним запросом берём «полку»
     # подряд идущих номеров и выбираем ближайший существующий к загаданному.
-    for attempt in range(3):
-        base = target + attempt * 50
+    for attempt in range(WIKI_SHELVES):
+        base = (target + attempt * 50) % WIKI_MAX_ID or 1
         ids = "|".join(str(base + i) for i in range(50))
         url = (f"{WIKI_API}/w/api.php?action=query&pageids={urllib.parse.quote(ids)}"
                "&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json")
         pages = _wiki_get(url).get("query", {}).get("pages", {})
         found = [
             pg for pg in pages.values()
-            if "missing" not in pg and (pg.get("extract") or "").strip()
+            # ns == 0 — только статьи. Без этого на полку попадают обсуждения,
+            # профили участников, шаблоны и категории, и гадание выпадает на них.
+            if "missing" not in pg and pg.get("ns") == 0
+            and (pg.get("extract") or "").strip()
         ]
         if found:
             # из найденной «полки» выбираем по числам человека — детерминированно
@@ -559,7 +574,8 @@ GUIDE_TASK = {
         "и не предлагаешь. Обряд идёт строго в два шага:\n"
         "ШАГ 1. Вопроса ещё нет — попроси написать вопрос. Ничего не вызывай.\n"
         "ШАГ 2. Вопрос есть, чисел нет — одной короткой фразой подтверди, что вопрос принят, "
-        "и попроси назвать номер страницы и номер строки. Без формата статьи. Ничего не вызывай.\n"
+        f"и попроси назвать страницу (1–{WIKI_MAX_PAGE}) и строку (1–{WIKI_MAX_LINE}). "
+        "Без формата статьи. Ничего не вызывай.\n"
         "ШАГ 3. Есть и вопрос, и числа — гадай.\n"
         "Если человек прислал всё сразу — не заставляй повторять, сразу переходи к шагу 3.\n"
         "Когда числа названы — вызови wiki_by_numbers и истолкуй найденное СТРОГО так:\n"
@@ -642,13 +658,19 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
         stop = {"погадай", "погадать", "гадание", "гадай", "divine", "divination"}
         words = [w for w in re.sub(r"[^\w\s]", " ", message.lower()).split() if w not in stop]
         if len(words) < 2:
-            reply = ("Напишите свой вопрос — а следом назовите номер страницы и номер строки."
+            reply = (f"Напишите свой вопрос — а следом назовите страницу "
+                     f"(1–{WIKI_MAX_PAGE:,}) и строку (1–{WIKI_MAX_LINE})."
+                     .replace(",", " ")
                      if ru else
-                     "Write your question — then name a page number and a line number.")
+                     f"Write your question — then name a page (1–{WIKI_MAX_PAGE:,}) "
+                     f"and a line (1–{WIKI_MAX_LINE}).")
         else:
-            reply = ("Вопрос принят. Теперь назовите номер страницы и номер строки."
+            reply = (f"Вопрос принят. Теперь назовите страницу "
+                     f"(1–{WIKI_MAX_PAGE:,}) и строку (1–{WIKI_MAX_LINE})."
+                     .replace(",", " ")
                      if ru else
-                     "Question received. Now name a page number and a line number.")
+                     f"Question received. Now name a page (1–{WIKI_MAX_PAGE:,}) "
+                     f"and a line (1–{WIKI_MAX_LINE}).")
         return {"reply": reply, "category": category, "mode": mode, "lead": None, "tools": []}
 
     # Гадание с числами ведём кодом: сами ходим в энциклопедию, сами ставим
