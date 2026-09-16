@@ -941,6 +941,174 @@ def run_chat(message: str, history: list[dict], mode: str = "consult") -> dict:
     }
 
 
+# ── ТЕЛЕГРАМ: те же три режима, только кнопками ──────────────────────
+# Отдельный сервис не нужен: мозги, прайс, справка и база уже здесь.
+# Телеграм просто ещё один вход — вебхук вместо виджета на сайте.
+TG_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+
+TG_MODES = {
+    "consult": "Консультант",
+    "lab": "Соб̶у̶седник",
+    "guide": "wikiмантия",
+}
+TG_HELLO = (
+    "Это бот ELLHOME. Внутри три разных собеседника — выбери, с кем говорить:\n\n"
+    "• <b>Консультант</b> — услуги, цены, сроки, заявка.\n"
+    "• <b>Собеседник</b> — заменитель Михаила: поговорить, спросить, "
+    "попросить придумать название.\n"
+    "• <b>wikiмантия</b> — гадание по энциклопедии: задаёшь вопрос, "
+    "называешь страницу и строку.\n\n"
+    "Переключиться можно в любой момент: /mode"
+)
+
+_tg_hist: dict[str, list[dict]] = {}     # переписка по чатам, в памяти
+_tg_mode_cache: dict[str, str] = {}      # режим, если база недоступна
+
+
+def _tg_api(method: str, payload: dict) -> dict:
+    if not TG_TOKEN:
+        return {}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_TOKEN}/{method}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        print(f"⚠️ Телеграм не принял {method}: {e}")
+        return {}
+
+
+def _md_to_html(text: str) -> str:
+    """Наша разметка → HTML телеграма. MarkdownV2 требует экранировать
+    полтора десятка символов и ломается на первом же дефисе, HTML спокойнее."""
+    t = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    t = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', t)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"~~([^~\n]+)~~\^([^^\n]+)\^", r"<s>\1</s> \2", t)
+    t = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", t)
+    t = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", t)
+    return t
+
+
+def _tg_keyboard() -> dict:
+    return {"inline_keyboard": [[
+        {"text": TG_MODES["consult"], "callback_data": "mode:consult"},
+        {"text": "Собеседник", "callback_data": "mode:lab"},
+        {"text": TG_MODES["guide"], "callback_data": "mode:guide"},
+    ]]}
+
+
+def _tg_send(chat_id, text: str, keyboard: bool = False) -> None:
+    payload = {"chat_id": chat_id, "text": _md_to_html(text)[:4000],
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if keyboard:
+        payload["reply_markup"] = _tg_keyboard()
+    _tg_api("sendMessage", payload)
+
+
+def _tg_get_mode(chat_id: str) -> str:
+    if DATABASE_URL:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+            try:
+                with conn, conn.cursor() as cur:
+                    cur.execute("CREATE TABLE IF NOT EXISTS tg_chats ("
+                                "chat_id TEXT PRIMARY KEY, mode TEXT, "
+                                "updated_at TIMESTAMP DEFAULT NOW())")
+                    cur.execute("SELECT mode FROM tg_chats WHERE chat_id = %s", (chat_id,))
+                    row = cur.fetchone()
+                    if row and row[0] in ("consult", "lab", "guide"):
+                        return row[0]
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"⚠️ Режим чата не прочитан: {e}")
+    return _tg_mode_cache.get(chat_id, "consult")
+
+
+def _tg_set_mode(chat_id: str, mode: str) -> None:
+    _tg_mode_cache[chat_id] = mode
+    _tg_hist.pop(chat_id, None)     # у каждого режима свой разговор
+    if not DATABASE_URL:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS tg_chats ("
+                            "chat_id TEXT PRIMARY KEY, mode TEXT, "
+                            "updated_at TIMESTAMP DEFAULT NOW())")
+                cur.execute(
+                    "INSERT INTO tg_chats (chat_id, mode) VALUES (%s, %s) "
+                    "ON CONFLICT (chat_id) DO UPDATE SET mode = EXCLUDED.mode, "
+                    "updated_at = NOW()",
+                    (chat_id, mode))
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ Режим чата не сохранён: {e}")
+
+
+def handle_tg_update(update: dict) -> None:
+    # нажали кнопку режима
+    cq = update.get("callback_query")
+    if cq:
+        chat_id = str(((cq.get("message") or {}).get("chat") or {}).get("id", ""))
+        data = str(cq.get("data", ""))
+        _tg_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+        if chat_id and data.startswith("mode:"):
+            mode = data.split(":", 1)[1]
+            if mode in TG_MODES:
+                _tg_set_mode(chat_id, mode)
+                hint = {
+                    "consult": "Консультант на связи. Спрашивайте про услуги, цены и сроки.",
+                    "lab": "~~Начальник вышел за сигаретами.~~ Начальник отошёл, я за него.\n\nСпрашивай что хочешь.",
+                    "guide": "wikiмантия. Сначала напишите свой вопрос, потом назовёте страницу (1–11 500) и строку (1–99).",
+                }[mode]
+                _tg_send(chat_id, hint)
+        return
+
+    msg = update.get("message") or update.get("edited_message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    text = (msg.get("text") or "").strip()
+    if not chat_id or not text:
+        return
+
+    if text.startswith("/start"):
+        _tg_set_mode(chat_id, "consult")
+        _tg_send(chat_id, TG_HELLO, keyboard=True)
+        return
+    if text.startswith("/mode") or text.startswith("/help"):
+        _tg_send(chat_id, "С кем говорим?", keyboard=True)
+        return
+    if text.startswith("/"):
+        _tg_send(chat_id, "Такой команды нет. Есть /mode — выбрать собеседника.")
+        return
+
+    if not _rate_ok("tg:" + chat_id):
+        _tg_send(chat_id, "Слишком много сообщений подряд — вернитесь через пару минут.")
+        return
+
+    mode = _tg_get_mode(chat_id)
+    hist = _tg_hist.get(chat_id, [])[-MAX_HISTORY:]
+    _tg_api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    try:
+        result = run_chat(text[:MAX_MESSAGE_LEN], hist, mode)
+        reply = result.get("reply") or "…"
+    except Exception as e:
+        print(f"⚠️ Телеграм-ответ не собрался: {e}")
+        reply = "⚠️ Заминка на моей стороне. Попробуйте ещё раз."
+    _tg_hist[chat_id] = (hist + [{"role": "user", "content": text},
+                                 {"role": "assistant", "content": reply}])[-MAX_HISTORY:]
+    _tg_send(chat_id, reply)
+
+
 # ── HTTP API ─────────────────────────────────────────────────────────
 app = FastAPI(title="ELLHOME bot API")
 
@@ -978,9 +1146,30 @@ def health():
         "provider": PROVIDER,
         "model": GEMINI_MODEL,
         "telegram": {"token": bool(TG_TOKEN), "chat": bool(TG_CHAT),
-                     "last": LAST_NOTIFY},
+                     "last": LAST_NOTIFY, "webhook_secret": bool(TG_SECRET)},
         "database": bool(DATABASE_URL),
     }
+
+
+@app.post("/tg")
+async def tg_webhook(request: Request):
+    """Вебхук телеграма. Секрет проверяем заголовком, который телеграм шлёт сам:
+    без него адрес мог бы дёргать кто угодно. Отвечаем 200 всегда — иначе
+    телеграм будет слать одно и то же обновление снова и снова."""
+    if TG_SECRET:
+        got = request.headers.get("x-telegram-bot-api-secret-token", "")
+        if got != TG_SECRET:
+            return {"ok": False}
+    try:
+        update = await request.json()
+    except Exception:
+        return {"ok": False}
+    try:
+        handle_tg_update(update if isinstance(update, dict) else {})
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return {"ok": True}
 
 
 @app.post("/event")
