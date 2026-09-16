@@ -40,6 +40,47 @@ MAX_HISTORY = 20                                      # сколько посл�
 _hits: dict[str, list[float]] = {}
 
 
+# ── УВЕДОМЛЕНИЯ В ТЕЛЕГРАМ ───────────────────────────────────────────
+# Заявка, о которой узнаёшь через два дня, — потерянная заявка. И молчащий
+# бот хуже отсутствующего: посетитель решит, что сломан весь сайт.
+# Поэтому оба события уходят в личку владельцу.
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+LAST_NOTIFY = "ещё не отправляли"   # видно в / — что ответил телеграм
+_notified: dict[str, float] = {}      # чтобы поломка не писала сто раз подряд
+
+
+def notify_owner(text: str, throttle_key: str = "", throttle_sec: int = 3600) -> bool:
+    """Шлёт сообщение владельцу. Никогда не роняет чат: не настроено или
+    телеграм недоступен — просто возвращает False."""
+    global LAST_NOTIFY
+    if not TG_TOKEN or not TG_CHAT:
+        LAST_NOTIFY = "не задан токен или chat_id"
+        return False
+    if throttle_key:
+        last = _notified.get(throttle_key, 0)
+        if time.time() - last < throttle_sec:
+            return False
+        _notified[throttle_key] = time.time()
+    try:
+        import urllib.request
+        import urllib.parse
+        data = urllib.parse.urlencode({
+            "chat_id": TG_CHAT,
+            "text": text[:3900],
+            "disable_web_page_preview": "true",
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data)
+        with urllib.request.urlopen(req, timeout=8) as r:
+            LAST_NOTIFY = f"ok {r.status}"
+            return r.status == 200
+    except Exception as e:
+        LAST_NOTIFY = f"ошибка: {e}"[:200]
+        print(f"⚠️ Телеграм не принял уведомление: {e}")
+        return False
+
+
 def _client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for")   # за прокси Render
     if fwd:
@@ -124,6 +165,10 @@ def call_model(messages: list[dict], temperature: float | None = None) -> str:
             model=GEMINI_MODEL, messages=messages, **kw
         ).choices[0].message.content or "")
     except Exception as e:
+        # Чаще всего это кончившийся баланс или отозванный ключ. Пишем владельцу
+        # раз в час: чаще — спам, реже — можно сутки не знать, что чат молчит.
+        notify_owner(f"⚠️ Бот не отвечает посетителям.\n\nПричина: {e}",
+                     throttle_key="model_down")
         return f"⚠️ Модель не отвечает (PROVIDER={PROVIDER}): {e}"
 
 
@@ -211,9 +256,34 @@ def record_lead(name: str, service: str, contact: str = "") -> int:
             return total
         except Exception as e:
             print(f"⚠️ Postgres недоступен ({e}); пишу заявку в файл.")
+            # Файл живёт внутри контейнера и стирается при деплое. Молчать об этом
+            # нельзя: заявки будут теряться, а узнаем мы через месяц.
+            notify_owner(
+                "⚠️ База не приняла заявку, она легла во временный файл "
+                "и пропадёт при следующем деплое.\n\n"
+                f"Причина: {e}",
+                throttle_key="db_down",
+            )
+    elif not DATABASE_URL:
+        notify_owner(
+            "⚠️ У бота не задан DATABASE_URL — заявки пишутся во временный файл "
+            "и пропадают при каждом деплое.",
+            throttle_key="db_missing",
+            throttle_sec=86400,
+        )
     total = _save_lead_to_file(name, service, contact)
     print(f"📒 [CRM] Новая заявка → leads.json: {name} — {service} (всего: {total})")
     return total
+
+
+def _announce_lead(name: str, service: str, contact: str, total: int) -> None:
+    notify_owner(
+        "🔔 Новая заявка с сайта\n\n"
+        f"Имя: {name}\n"
+        f"Задача: {service}\n"
+        f"Контакт: {contact or '— не оставил —'}\n\n"
+        f"Всего заявок: {total}"
+    )
 
 
 # ── STRUCTURED OUTPUT — имя+задача в JSON ────────────────────────────
@@ -382,6 +452,7 @@ def execute_tool(name: str, args: dict) -> dict:
         if not nm or not task:
             return {"ok": False, "error": "нужны имя и описание задачи"}
         total = record_lead(nm, task, contact)
+        _announce_lead(nm, task, contact, total)
         return {"ok": True, "saved": {"name": nm, "task": task, "contact": contact}, "total": total}
 
     if name == "wiki_by_numbers":
@@ -844,7 +915,16 @@ class ChatIn(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "provider": PROVIDER, "model": GEMINI_MODEL}
+    # Диагностика без секретов: видно, что настроено, но не сами значения.
+    # last_notify — результат последней попытки написать в телеграм.
+    return {
+        "status": "ok",
+        "provider": PROVIDER,
+        "model": GEMINI_MODEL,
+        "telegram": {"token": bool(TG_TOKEN), "chat": bool(TG_CHAT),
+                     "last": LAST_NOTIFY},
+        "database": bool(DATABASE_URL),
+    }
 
 
 @app.post("/chat")
