@@ -35,6 +35,8 @@ USE_JUDGE = os.getenv("USE_JUDGE", "false").lower() == "true"
 # ── Лимиты (защита от спама и от лишних трат) ────────────────────────
 RATE_WINDOW = int(os.getenv("RATE_WINDOW", "600"))   # окно, сек (10 мин)
 RATE_MAX = int(os.getenv("RATE_MAX", "15"))          # сообщений за окно с одного IP
+# события счётчика идут пачками (визит — это десяток строк), лимит свободнее
+EVENT_RATE_MAX = int(os.getenv("EVENT_RATE_MAX", "120"))
 MAX_MESSAGE_LEN = 1000                                # максимум символов в сообщении
 MAX_HISTORY = 20                                      # сколько последних реплик шлём модели
 _hits: dict[str, list[float]] = {}
@@ -88,10 +90,11 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _rate_ok(ip: str) -> bool:
+def _rate_ok(ip: str, limit: int | None = None) -> bool:
     now = time.time()
+    cap = RATE_MAX if limit is None else limit
     hits = [t for t in _hits.get(ip, []) if now - t < RATE_WINDOW]
-    if len(hits) >= RATE_MAX:
+    if len(hits) >= cap:
         _hits[ip] = hits
         return False
     hits.append(now)
@@ -244,6 +247,53 @@ def _save_lead_to_db(name: str, service: str, contact: str = "") -> int:
         return total
     finally:
         conn.close()
+
+
+# ── СОБЫТИЯ САЙТА ────────────────────────────────────────────────────
+# Свой счётчик вместо внешнего: куки не ставим, IP и тексты не храним.
+# Смысл один — понимать, докуда доходят люди и что открывают.
+EVENT_NAMES = {
+    "page_view", "section_view", "lang_switch",
+    "chat_open", "chat_tab", "chat_message", "chat_copy",
+    "contact_click", "project_view",
+}
+_events_ready = False
+
+
+def record_event(name: str, props: dict, session: str) -> bool:
+    """Пишем событие в Postgres. Нет базы — молча ничего не делаем:
+    аналитика не тот повод, чтобы ронять сайт или спамить владельца."""
+    global _events_ready
+    if not DATABASE_URL or name not in EVENT_NAMES:
+        return False
+    try:
+        import psycopg2
+        from psycopg2.extras import Json
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        try:
+            with conn, conn.cursor() as cur:
+                if not _events_ready:
+                    cur.execute(
+                        "CREATE TABLE IF NOT EXISTS events ("
+                        "id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, "
+                        "props JSONB, session TEXT, "
+                        "created_at TIMESTAMP DEFAULT NOW())"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS events_name_time "
+                        "ON events (name, created_at DESC)"
+                    )
+                    _events_ready = True
+                cur.execute(
+                    "INSERT INTO events (name, props, session) VALUES (%s, %s, %s)",
+                    (name[:40], Json(props or {}), (session or "")[:40]),
+                )
+        finally:
+            conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Событие не записалось: {e}")
+        return False
 
 
 def record_lead(name: str, service: str, contact: str = "") -> int:
@@ -907,6 +957,12 @@ class Msg(BaseModel):
     content: str
 
 
+class EventIn(BaseModel):
+    name: str
+    props: dict = {}
+    session: str = ""
+
+
 class ChatIn(BaseModel):
     message: str
     history: list[Msg] = []
@@ -925,6 +981,22 @@ def health():
                      "last": LAST_NOTIFY},
         "database": bool(DATABASE_URL),
     }
+
+
+@app.post("/event")
+def event_endpoint(body: EventIn, request: Request):
+    """Событие с сайта. Отдаёт 200 всегда: счётчик не должен мешать странице."""
+    # лимит свободнее, чем у чата: событий за визит бывает десяток
+    if not _rate_ok("ev:" + _client_ip(request), limit=EVENT_RATE_MAX):
+        return {"ok": False, "skipped": "rate"}
+    # чистим то, что прислал браузер: не больше десяти полей, короткие значения
+    props = {
+        k: (v if isinstance(v, (int, float, bool)) else str(v)[:120])
+        for k, v in list((body.props or {}).items())[:10]
+        if isinstance(k, str) and len(k) <= 30
+    }
+    ok = record_event((body.name or "").strip(), props, (body.session or "").strip())
+    return {"ok": ok}
 
 
 @app.post("/chat")
