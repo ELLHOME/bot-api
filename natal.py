@@ -137,6 +137,7 @@ def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
         })
 
     extra = _extras(jd, bodies, cusps, ascmc)
+    extra["fictional"] = fictional(jd, cusps)
     return {
         "utc": utc.isoformat(),
         "jd": jd,
@@ -364,3 +365,39 @@ def transits(natal_chart: dict, when_utc: dt.datetime | None = None,
                 break
     hits.sort(key=lambda h: (h["orb"], not h["slow"]))
     return {"when": now.date().isoformat(), "sky": sky, "moon": moon_now, "hits": hits}
+
+
+# ── Гипотетические точки ─────────────────────────────────────────────
+# Прозерпина, Вулкан и Селена — не тела. Их никто не наблюдал; это
+# расчётные конструкции астрологических школ, и считаются они по орбитам,
+# которые кто-то назначил. Файл этих орбит идёт в составе Swiss Ephemeris
+# и начинается строкой самих авторов библиотеки:
+#
+#     Warning! These planets do not exist!
+#
+# Мы их считаем, потому что людям из авестийской школы они нужны, но
+# держим отдельно: ни в аспекты, ни в стихии, ни в колесо, ни в текст
+# толкования они не попадают. Иначе страница, которая обещает точную
+# астрономию, начнёт тихо подмешивать в неё невидимые планеты.
+FICTIONAL = []
+for _name, _attr in (("Прозерпина", "PROSERPINA"),
+                     ("Вулкан", "VULCAN"),
+                     ("Селена", "WHITE_MOON")):
+    if hasattr(swe, _attr):
+        FICTIONAL.append((_name, getattr(swe, _attr)))
+
+
+def fictional(jd: float, cusps) -> list[dict]:
+    """Точки, за которыми нет физических тел. Пустой список — тоже ответ:
+    нет файла орбит, нет и точек, а карта считается как считалась."""
+    out = []
+    for name, pid in FICTIONAL:
+        try:
+            pos, _ = swe.calc_ut(jd, pid, FLAGS)
+        except Exception:
+            continue
+        longitude = pos[0] % 360
+        out.append({"name": name, "lon": round(longitude, 4),
+                    "label": _fmt(longitude), "retro": pos[3] < 0,
+                    "house": _house_of(longitude, cusps)})
+    return out
