@@ -332,6 +332,57 @@ def interpret(ch: dict, ask) -> dict:
     return {"lead": lead, "blocks": blocks, "verdict": verdict}
 
 
+# ── Часы, которых не бывает, и часы, которые бывают дважды ───────────
+# Дважды в год перевод стрелок ломает однозначность «местного времени».
+# Осенью час повторяется, весной час пропадает. Ошибка ровно в час —
+# для планет это мелочь, а асцендент уезжает на пол-знака. Молчать об этом
+# на странице, которая называется «посчитанная всерьёз», нельзя.
+
+
+def _fmt_off(a: dt.datetime) -> str:
+    h = a.utcoffset().total_seconds() / 3600
+    return f"UTC{'+' if h >= 0 else '−'}{abs(h):g}"
+
+
+def tz_trouble(naive: dt.datetime, tz: str) -> tuple[str, str]:
+    """Возвращает (вид, подпись). Вид: '' | 'ambiguous' | 'skipped'."""
+    zone = ZoneInfo(tz)
+    a0 = naive.replace(tzinfo=zone, fold=0)
+    a1 = naive.replace(tzinfo=zone, fold=1)
+    if a0.utcoffset() == a1.utcoffset():
+        return "", ""
+    # Пропущенный час узнаём по тому, что оно не переживает оборот в UTC и обратно:
+    # такого показания на часах в этой зоне просто не было.
+    back = a0.astimezone(dt.timezone.utc).astimezone(zone).replace(tzinfo=None)
+    kind = "ambiguous" if back == naive else "skipped"
+    return kind, f"{_fmt_off(a0)} / {_fmt_off(a1)}"
+
+
+def tz_note(naive: dt.datetime, tz: str, lat: float, lon: float) -> str:
+    kind, _ = tz_trouble(naive, tz)
+    if not kind:
+        return ""
+    zone = ZoneInfo(tz)
+    a0, a1 = naive.replace(tzinfo=zone, fold=0), naive.replace(tzinfo=zone, fold=1)
+    if kind == "skipped":
+        return (f"В эту ночь стрелки переводили вперёд, и такого времени на часах "
+                f"не существовало — час был пропущен. Карта посчитана по {_fmt_off(a0)}, "
+                f"как если бы время записали по старым стрелкам. Если точность важна, "
+                f"стоит уточнить час рождения.")
+    # Неоднозначный час: показываем, чем именно отличался бы второй проход.
+    # Это дешевле объяснений — видно своими глазами.
+    try:
+        alt = engine.chart(naive, tz, lat, lon, fold=1)
+        tail = (f" Во втором случае асцендент был бы {alt['asc']['label']} "
+                f"вместо того, что в шапке, а дома сдвинулись бы вместе с ним. "
+                f"Положения планет в знаках при этом почти те же.")
+    except Exception:
+        tail = " Во втором случае вся карта сдвинулась бы примерно на пол-знака."
+    return (f"В эту ночь стрелки переводили назад, и такое время было на часах дважды: "
+            f"сначала по {_fmt_off(a0)}, через час — по {_fmt_off(a1)}. "
+            f"Взят первый проход.{tail}")
+
+
 # ── Ручки ────────────────────────────────────────────────────────────
 class ChartIn(BaseModel):
     date: str = ""        # 1990-05-17
@@ -389,8 +440,14 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
 
         key = (f"v{READING_V}|{body.date}|{body.time}|{round(body.lat, 3)}"
                f"|{round(body.lon, 3)}|{tz}|{int(bool(body.unknown_time))}")
+        # Предупреждение про перевод стрелок считается заново на каждый ответ:
+        # оно выводится из тех же данных и стоит доли миллисекунды, зато старые
+        # строки в кэше не надо пересчитывать ради нового поля.
+        warn = tz_note(when, tz, body.lat, body.lon) if engine else ""
+
         cached = _cache_get("natal_readings", "key", key)
         if cached:
+            cached["tz_note"] = warn
             return cached
 
         try:
@@ -411,6 +468,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             "utc_offset": dt.datetime(when.year, when.month, when.day, when.hour,
                                       when.minute, tzinfo=ZoneInfo(tz)).utcoffset().total_seconds() / 3600,
             "time_known": not body.unknown_time,
+            "tz_note": warn,
             "note": ("" if not body.unknown_time else
                      "Время рождения не указано — взят полдень. Дома, асцендент и "
                      "середина неба при этом недостоверны: за сутки они делают полный оборот. "

@@ -45,9 +45,14 @@ def _fmt(lon: float) -> str:
 
 
 def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
-          hsys: bytes = b"P") -> dict:
-    """when_local — местное время рождения, tz — зона вроде 'Europe/Moscow'."""
-    aware = when_local.replace(tzinfo=ZoneInfo(tz))
+          hsys: bytes = b"P", fold: int = 0) -> dict:
+    """when_local — местное время рождения, tz — зона вроде 'Europe/Moscow'.
+
+    fold различает два прохода одного и того же часа в ночь перевода стрелок
+    назад: 0 — первый (летнее время), 1 — второй (зимнее). В обычные сутки
+    он ни на что не влияет.
+    """
+    aware = when_local.replace(tzinfo=ZoneInfo(tz), fold=fold)
     utc = aware.astimezone(dt.timezone.utc)
     jd = swe.julday(utc.year, utc.month, utc.day,
                     utc.hour + utc.minute / 60 + utc.second / 3600)
