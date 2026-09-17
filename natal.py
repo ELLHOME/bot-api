@@ -234,3 +234,93 @@ def _aspects(bodies: list[dict]) -> list[dict]:
                                 "exact": round(delta, 2)})
                     break
     return sorted(out, key=lambda x: x["exact"])
+
+
+# ── Транзиты: сегодняшнее небо против карты рождения ─────────────────
+# Натальная карта не меняется никогда. Меняется небо над ней, и именно
+# это люди имеют в виду под «что сейчас». Углы считаются к тем же точкам
+# и той же эфемеридой — просто на другую дату.
+
+# Тела, чьи транзиты имеет смысл показывать. Луна проходит знак за два дня,
+# её транзиты живут часы — в списке событий от них один шум, поэтому Луна
+# идёт отдельной строкой «где она сегодня», а не аспектами.
+TRANSITING = [("Солнце", swe.SUN), ("Меркурий", swe.MERCURY), ("Венера", swe.VENUS),
+              ("Марс", swe.MARS), ("Юпитер", swe.JUPITER), ("Сатурн", swe.SATURN),
+              ("Уран", swe.URANUS), ("Нептун", swe.NEPTUNE), ("Плутон", swe.PLUTO)]
+
+# Быстрым телам орб уже: иначе Солнце «касается» карты каждый день
+# и событие перестаёт быть событием.
+FAST = {"Солнце", "Меркурий", "Венера", "Марс"}
+
+
+def _jd(when_utc: dt.datetime) -> float:
+    return swe.julday(when_utc.year, when_utc.month, when_utc.day,
+                      when_utc.hour + when_utc.minute / 60)
+
+
+def _gap(a: float, b: float) -> float:
+    d = abs(a - b) % 360
+    return 360 - d if d > 180 else d
+
+
+def transits(natal_chart: dict, when_utc: dt.datetime | None = None,
+             horizon: int = 120) -> dict:
+    """Где планеты сейчас и что из этого стоит к точкам карты.
+
+    Для каждого попадания ищем день, когда угол точен: сканируем окно
+    в четыре месяца вокруг сегодня и берём минимум расхождения. Так же
+    становится видно, сходится аспект или уже расходится.
+    """
+    now = when_utc or dt.datetime.now(dt.timezone.utc)
+    jd = _jd(now)
+
+    targets = {p["name"]: p["lon"] for p in natal_chart["planets"]}
+    targets["ASC"] = natal_chart["asc"]["lon"]
+    targets["MC"] = natal_chart["mc"]["lon"]
+
+    sky = []
+    for name, pid in TRANSITING:
+        pos, _ = swe.calc_ut(jd, pid, FLAGS)
+        sky.append({"name": name, "lon": round(pos[0] % 360, 4),
+                    "label": _fmt(pos[0]), "retro": pos[3] < 0})
+
+    moon, _ = swe.calc_ut(jd, swe.MOON, FLAGS)
+    sun, _ = swe.calc_ut(jd, swe.SUN, FLAGS)
+    el = (moon[0] - sun[0]) % 360
+    import math
+    moon_now = {"label": _fmt(moon[0]), "sign": _sign(moon[0])[0],
+                "phase": next(n for a, b, n in PHASES if a <= el < b),
+                "illum": round((1 - math.cos(math.radians(el))) / 2 * 100)}
+
+    hits = []
+    for name, pid in TRANSITING:
+        pos, _ = swe.calc_ut(jd, pid, FLAGS)
+        limit = 2.0 if name in FAST else 3.0
+        for tname, tlon in targets.items():
+            d = _gap(pos[0], tlon)
+            for title, angle, _orb in ASPECTS:
+                delta = abs(d - angle)
+                if delta > limit:
+                    continue
+                # день, когда угол точен
+                best_k, best_d = 0, 999.0
+                step = 1 if name in FAST else 2
+                for k in range(-horizon, horizon + 1, step):
+                    p2, _ = swe.calc_ut(_jd(now + dt.timedelta(days=k)), pid, FLAGS)
+                    dd = abs(_gap(p2[0], tlon) - angle)
+                    if dd < best_d:
+                        best_d, best_k = dd, k
+                exact = (now + dt.timedelta(days=best_k)).date()
+                hits.append({
+                    "who": name, "type": title, "to": tname,
+                    "orb": round(delta, 2),
+                    "state": ("точен сейчас" if abs(best_k) <= 1
+                              else "сходится" if best_k > 0 else "расходится"),
+                    "exact": exact.isoformat(),
+                    "days": best_k,
+                    "retro": pos[3] < 0,
+                    "slow": name not in FAST,
+                })
+                break
+    hits.sort(key=lambda h: (h["orb"], not h["slow"]))
+    return {"when": now.date().isoformat(), "sky": sky, "moon": moon_now, "hits": hits}

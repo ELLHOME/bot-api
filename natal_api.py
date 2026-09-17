@@ -35,6 +35,10 @@ MIN_YEAR = 1900
 # Строки с прошлой версией просто перестают находиться.
 READING_V = 3
 
+# Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
+# не меняется никогда, а небо над ней — каждый день.
+TRANSIT_V = 1
+
 try:
     import natal as engine
 except Exception as e:                      # pragma: no cover
@@ -63,6 +67,9 @@ def _ensure_tables(cur) -> None:
                 "q TEXT PRIMARY KEY, payload JSONB NOT NULL, "
                 "created_at TIMESTAMP DEFAULT NOW())")
     cur.execute("CREATE TABLE IF NOT EXISTS natal_readings ("
+                "key TEXT PRIMARY KEY, payload JSONB NOT NULL, "
+                "created_at TIMESTAMP DEFAULT NOW())")
+    cur.execute("CREATE TABLE IF NOT EXISTS transit_readings ("
                 "key TEXT PRIMARY KEY, payload JSONB NOT NULL, "
                 "created_at TIMESTAMP DEFAULT NOW())")
     _db_ready = True
@@ -240,13 +247,54 @@ def digest(ch: dict) -> dict:
     }
 
 
-SYSTEM_NATAL = (
-    "Ты пишешь разбор натальной карты для страницы «Эфемерида».\n"
-    "\n"
+VOICE = (
     "ГОЛОС. Сухой, точный, с холодноватой усмешкой. Так пишет человек, который "
     "умеет считать и не путает расчёт с выводом. Короткие предложения. "
     "Порядок внутри абзаца: сначала факт, потом что он значит по ремеслу, "
     "потом — по-житейски, обычными словами, как сказал бы приятель.\n"
+    "\n"
+    "ЗАПРЕЩЕНЫ обороты, которыми пишут справки и гороскопы. Ни одного из них: "
+    "«свидетельствует», «проявляется», «обозначает», «указывает на», «является», "
+    "«характеризуется», «отражает», «определяет», «формирует», «на уровне характера», "
+    "«в толковании это», «в поведении это», «данный», «базовая структура», "
+    "«структура личности», «астрономическое положение», «энергии», «вибрации», "
+    "«кармические задачи», «личностные планы». Отглагольных существительных "
+    "(«восприятие», «самовыражение», «социализация») — не больше одного на абзац.\n"
+)
+
+SYSTEM_NOW = (
+    "Ты пишешь раздел «что сейчас» для страницы «Эфемерида».\n"
+    "\n" + VOICE + "\n"
+    "Тебе дают сегодняшнее небо и углы, которые сегодняшние планеты образуют "
+    "к точкам карты рождения. Орбы и даты посчитаны, твоё дело — рассказать.\n"
+    "\n"
+    "ПРАВИЛА, нарушать которые нельзя:\n"
+    "1. Все числа, названия и даты — только из выданных фактов. Ничего не считай сам.\n"
+    "2. НИКАКИХ предсказаний и НИКАКИХ советов. Не пиши, что человеку делать, чего "
+    "избегать, что его ждёт, когда начинать и когда воздержаться. Ты описываешь "
+    "конфигурацию неба и то, КАК ЕЁ ПРИНЯТО ТОЛКОВАТЬ. Это разные вещи, и разница "
+    "должна быть видна в тексте: «так принято читать», «астрологи называют это», "
+    "«традиция приписывает».\n"
+    "3. Честно про срок. Солнце, Меркурий, Венера и Марс проходят точку за дни — "
+    "это короткий эпизод. Юпитер, Сатурн, Уран, Нептун и Плутон стоят месяцами, "
+    "а с учётом ретроградных петель возвращаются по нескольку раз.\n"
+    "4. Аспект «расходится» — он уже был точен, это позади. «Сходится» — назови дату, "
+    "когда угол станет точным. «Точен сейчас» — так и скажи.\n"
+    "5. Не льсти и не пугай. Ни одного «вас ждёт», ни одного «будьте осторожны».\n"
+    "\n"
+    "Разметка: **жирный** для первой фразы абзаца, больше ничего.\n"
+    "\n"
+    "Формат ответа — строго JSON без пояснений:\n"
+    '{"blocks": ["абзац", "абзац", "абзац"], "tail": "одна строка"}\n'
+    "Абзацев два или три, про самые точные углы, и каждый про свой. "
+    "tail — одна сухая строка о том, что всё перечисленное относится к небу, "
+    "а не к жизни, и совпадения человек проверяет сам."
+)
+
+SYSTEM_NATAL = (
+    "Ты пишешь разбор натальной карты для страницы «Эфемерида».\n"
+    "\n"
+    + VOICE +
     "\n"
     "Вот образец голоса. Карта чужая, факты оттуда брать нельзя — нужен только тон:\n"
     "\n"
@@ -264,14 +312,6 @@ SYSTEM_NATAL = (
     "минуты — такое не разглядеть невооружённым глазом. Соблазнительно сделать отсюда "
     "вывод о характере, но честнее сказать иначе: летом 2010-го это стояло у каждого "
     "новорождённого на планете. Личного тут ноль, это отпечаток эпохи.»\n"
-    "\n"
-    "ЗАПРЕЩЕНЫ обороты, которыми пишут справки и гороскопы. Ни одного из них: "
-    "«свидетельствует», «проявляется», «обозначает», «указывает на», «является», "
-    "«характеризуется», «отражает», «определяет», «формирует», «на уровне характера», "
-    "«в толковании это», «в поведении это», «данный», «базовая структура», "
-    "«структура личности», «астрономическое положение», «энергии», «вибрации», "
-    "«кармические задачи», «личностные планы». Отглагольных существительных "
-    "(«восприятие», «самовыражение», «социализация») — не больше одного на абзац.\n"
     "\n"
     "ПРАВИЛА, нарушать которые нельзя:\n"
     "1. Все числа, знаки, дома и аспекты берутся ТОЛЬКО из выданных фактов. "
@@ -367,6 +407,60 @@ def interpret(ch: dict, ask) -> dict:
     if not blocks:
         return {**_fallback_reading(d), "lead": lead}
     return {"lead": lead, "blocks": blocks, "verdict": verdict}
+
+
+def _ru_date(iso: str) -> str:
+    MONTHS = ["января","февраля","марта","апреля","мая","июня",
+              "июля","августа","сентября","октября","ноября","декабря"]
+    d = dt.date.fromisoformat(iso)
+    return f"{d.day} {MONTHS[d.month - 1]} {d.year}"
+
+
+def now_facts(tr: dict) -> dict:
+    """Сегодняшнее небо и попадания в карту — в виде, понятном модели."""
+    sky = [f"{p['name']}: {p['label']}" + (", ретроградно" if p["retro"] else "")
+           for p in tr["sky"]]
+    m = tr["moon"]
+    hits = []
+    for h in tr["hits"][:8]:
+        when = ("точен сегодня" if h["state"] == "точен сейчас"
+                else f"{h['state']}, точный угол {_ru_date(h['exact'])}")
+        hits.append(f"{h['who']}{' (ретроградно)' if h['retro'] else ''} "
+                    f"{h['type']} к натальному {h['to']}: "
+                    f"сейчас {_arcmin(h['orb'])} от точного, {when}, "
+                    f"{'медленная планета — эпизод на месяцы' if h['slow'] else 'быстрая планета — эпизод на дни'}")
+    return {
+        "дата": _ru_date(tr["when"]),
+        "небо сегодня": sky,
+        "Луна сегодня": f"{m['label']}, {m['phase']}, освещено {m['illum']}%",
+        "углы к карте рождения": hits,
+    }
+
+
+def interpret_now(tr: dict, ask) -> dict:
+    prompt = ("Факты:\n" + json.dumps(now_facts(tr), ensure_ascii=False, indent=1) +
+              "\n\nНапиши раздел «что сейчас» по правилам. Только JSON.")
+    try:
+        raw = ask(prompt, system=SYSTEM_NOW, temperature=0.9) or ""
+        m = re.search(r"\{.*\}", raw, re.S)
+        out = json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print(f"⚠️ Раздел «что сейчас» не сгенерировался: {e}")
+        out = {}
+    blocks = [str(b)[:1200] for b in (out.get("blocks") or [])][:4]
+    if not blocks:
+        top = tr["hits"][0] if tr["hits"] else None
+        blocks = ["**Небо посчитано, слова — нет.** Модель сейчас недоступна, "
+                  "поэтому ниже только таблица: где планеты стоят сегодня и какие "
+                  "углы они держат к карте рождения."]
+        if top:
+            blocks.append(f"**Самый точный угол на сегодня** — {top['who']} "
+                          f"{top['type']} к натальному {top['to']}, "
+                          f"{_arcmin(top['orb'])} от точного.")
+    return {"blocks": blocks,
+            "tail": str(out.get("tail") or
+                        "Всё перечисленное — про небо, а не про жизнь. "
+                        "Совпадения проверяйте сами.")[:300]}
 
 
 # ── Часы, которых не бывает, и часы, которые бывают дважды ───────────
@@ -483,9 +577,6 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         warn = tz_note(when, tz, body.lat, body.lon) if engine else ""
 
         cached = _cache_get("natal_readings", "key", key)
-        if cached:
-            cached["tz_note"] = warn
-            return cached
 
         try:
             ch = engine.chart(when, tz, body.lat, body.lon)
@@ -493,12 +584,39 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             print(f"⚠️ Карта не посчиталась: {e}")
             return {"error": "Расчёт не сошёлся. Проверьте дату и место."}
 
-        reading = interpret(ch, ask)
+        # Небо над картой меняется каждый день, сама карта — никогда.
+        # Поэтому у раздела «что сейчас» свой кэш, со сроком в сутки,
+        # и считается он параллельно с разбором: оба запроса сетевые,
+        # ждать их по очереди значит удвоить паузу на первом заходе.
+        try:
+            tr = engine.transits(ch)
+        except Exception as e:
+            print(f"⚠️ Транзиты не посчитались: {e}")
+            tr = None
+
+        now_key = f"t{TRANSIT_V}|{key}|{tr['when']}" if tr else ""
+        now_cached = _cache_get("transit_readings", "key", now_key) if tr else None
+
+        if cached is not None:
+            reading = cached.get("reading") or {}
+        if now_cached is not None and cached is not None:
+            now_text = now_cached
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_read = pool.submit(interpret, ch, ask) if cached is None else None
+                f_now = (pool.submit(interpret_now, tr, ask)
+                         if tr and now_cached is None else None)
+                reading = f_read.result() if f_read else (cached or {}).get("reading") or {}
+                now_text = f_now.result() if f_now else now_cached
+            if tr and now_cached is None and now_text:
+                _cache_put("transit_readings", "key", now_key, now_text)
         # Время неизвестно — дома и углы карты бессмысленны: они проворачиваются
         # на весь круг за сутки. Честнее сказать это, чем молча показать.
         payload = {
             "chart": ch,
             "reading": reading,
+            "now": ({**tr, "text": now_text} if tr and now_text else None),
             "place": (body.place or "").strip()[:80],
             "tz": tz,
             "when": f"{body.date} {body.time}",
@@ -512,7 +630,10 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
                      "Положения планет в знаках верны, кроме Луны — она за сутки проходит "
                      "до 15 градусов."),
         }
-        _cache_put("natal_readings", "key", key, payload)
+        # В кэш карты кладём только то, что не зависит от сегодняшнего дня.
+        if cached is None:
+            _cache_put("natal_readings", "key", key,
+                       {k: v for k, v in payload.items() if k not in ("now", "tz_note")})
         return payload
 
     return router
