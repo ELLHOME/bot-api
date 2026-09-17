@@ -157,6 +157,34 @@ def rank_places(places: list[dict], q: str, limit: int = 7) -> list[dict]:
     return sorted(places, key=rank)[:limit]
 
 
+# Слова, которые есть у половины регионов и потому ничего не уточняют.
+# Без этого «Красноярская обл» цеплялась бы за любую «область» в стране.
+GENERIC = {"обл", "область", "области", "край", "края", "район", "районе",
+           "респ", "республика", "республике", "ао", "округ", "округе",
+           "губерния", "oblast", "region", "province", "district", "county", "state"}
+
+
+def _matches_region(c: dict, words: list[str]) -> bool:
+    """Слова после названия — уточнение места: регион или страна.
+
+    Сравниваем по общему началу, а не по точному совпадению: человек пишет
+    «Красноярская обл», а в базе «Красноярский край», и оба должны сойтись.
+    Хватает одного попавшего слова — «обл» и «р-н» ни с чем не совпадут,
+    и требовать от них попадания значит наказывать за вежливость.
+    """
+    hay = f"{c.get('region', '')} {c.get('country', '')}".lower()
+    parts = [w for w in re.split(r"[\s,.\-]+", hay) if len(w) > 2 and w not in GENERIC]
+    words = [w for w in words if w not in GENERIC]
+    if not words:                 # уточнили одними «обл» и «край» — значит, не уточнили
+        return True
+
+    def close(a: str, b: str) -> bool:
+        need = min(4, len(a), len(b))
+        return need >= 3 and a[:need] == b[:need]
+
+    return any(close(w, p) for w in words if len(w) > 2 for p in parts)
+
+
 def geo_search(q: str) -> list[dict]:
     q = (q or "").strip()[:64]
     if len(q) < 2:
@@ -170,6 +198,19 @@ def geo_search(q: str) -> list[dict]:
         return hit
     try:
         res = rank_places(_geo_fetch(q, lang), q)
+        # Одноимённых деревень в стране бывают десятки, а мест в подсказке
+        # семь. Поэтому если целиком запрос ничего не дал, разбираем его как
+        # «название + уточнение»: ищем по первому слову, остальным фильтруем
+        # регион. Полный запрос пробуем первым — многословные названия
+        # вроде «Нижний Новгород» должны находиться как есть.
+        words = q.split()
+        if len(words) > 1:
+            head, tail = words[0], [w.lower() for w in words[1:]]
+            if len(head) >= 2:
+                wide = rank_places(_geo_fetch(head, lang), head, limit=40)
+                narrow = [c for c in wide if _matches_region(c, tail)]
+                if narrow:
+                    res = narrow[:7]
     except Exception as e:
         print(f"⚠️ Геокодер недоступен: {e}")
         return []
@@ -530,6 +571,76 @@ def tz_note(naive: dt.datetime, tz: str, lat: float, lon: float) -> str:
             f"Взят первый проход.{tail}")
 
 
+SYSTEM_ASK = (
+    "Ты отвечаешь на вопрос человека на странице «Эфемерида». У тебя есть его "
+    "карта рождения и сегодняшнее небо над ней.\n"
+    "\n" + VOICE + "\n"
+    "ЧТО ТЫ ДЕЛАЕШЬ. Человек пришёл с вопросом — «что делать», «чем кончится», "
+    "«стоит ли». Ты не знаешь ответа, и никакая карта его не знает. Но ты умеешь "
+    "две вещи: назвать точный факт про небо и задать вопрос, который человек "
+    "сам себе не задал. Этого обычно хватает.\n"
+    "\n"
+    "ЗАПРЕЩЕНО НАСТРОГО:\n"
+    "1. Предсказывать. Никаких «вас ждёт», «в октябре начнётся», «этот человек "
+    "вернётся». Ты не знаешь будущего.\n"
+    "2. Указывать, что делать. Никаких «увольняйтесь», «подождите до ноября», "
+    "«не подписывайте». Решение принимает он, и последствия несёт тоже он.\n"
+    "3. Советовать по здоровью, деньгам, лекарствам и юридическим делам. "
+    "Тут отправляй к тем, кто в этом разбирается, — врачу, юристу.\n"
+    "4. Делать вид, что расположение планет определяет исход. Астрология "
+    "в этом разговоре — повод подумать, а не причина событий. Держи это видимым.\n"
+    "5. Льстить, пугать и набивать цену. Никакой мистики и никакого «вы особенный».\n"
+    "\n"
+    "ЕСЛИ В ВОПРОСЕ БЕДА. Насилие, мысли о смерти, тяжёлая болезнь, отчаяние — "
+    "брось астрологию совсем. Не считай, не толкуй, не шути. Скажи прямо и коротко, "
+    "по-человечески: карта тут ничем не поможет, и с таким стоит идти к живому "
+    "человеку — тому, кому доверяешь, или к специалисту. Три-четыре предложения, "
+    "без глифов и без градусов.\n"
+    "\n"
+    "КАК ОТВЕЧАТЬ В ОБЫЧНОМ СЛУЧАЕ. Два-три коротких абзаца, не больше.\n"
+    "— Возьми из фактов то, что правда относится к вопросу. Если ничего "
+    "подходящего в небе нет, так и скажи: сегодня по этой части тихо. Это "
+    "честнее, чем притягивать за уши.\n"
+    "— Числа и даты — только выданные, своих не придумывай.\n"
+    "— Закончи вопросом к человеку. Не риторическим, а таким, на который он "
+    "может ответить себе сам и сдвинуться с места.\n"
+    "\n"
+    "Разметка: **жирный** для одной ключевой фразы, не больше. Никакого JSON, "
+    "пиши обычным текстом, абзацы разделяй пустой строкой."
+)
+
+
+def answer_question(ch: dict, tr: dict | None, question: str, ask) -> str:
+    facts = {
+        "карта рождения": {
+            "асцендент": ch["asc"]["label"], "середина неба": ch["mc"]["label"],
+            "положения": [f"{p['name']}: {p['label']}, дом {p['house']}"
+                          f"{', ретроградна' if p['retro'] else ''}" for p in ch["planets"]],
+            "самые точные аспекты": [
+                f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})"
+                for a in ch["aspects"][:6]],
+        },
+    }
+    if tr:
+        facts["сегодня"] = now_facts(tr)
+    prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) +
+              "\n\nВопрос человека: " + question.strip() +
+              "\n\nОтветь по правилам.")
+    try:
+        out = (ask(prompt, system=SYSTEM_ASK, temperature=0.9) or "").strip()
+    except Exception as e:
+        print(f"⚠️ Ответ на вопрос не сгенерировался: {e}")
+        return ""
+    # Модель иногда сползает в JSON, хотя просили текст.
+    if out.startswith("{"):
+        try:
+            d = json.loads(out)
+            out = " ".join(str(v) for v in d.values() if isinstance(v, str))
+        except Exception:
+            pass
+    return out[:2500]
+
+
 # ── Ручки ────────────────────────────────────────────────────────────
 class ChartIn(BaseModel):
     date: str = ""        # 1990-05-17
@@ -556,6 +667,10 @@ def _parse_when(body: ChartIn) -> tuple[dt.datetime, str] | tuple[None, str]:
     if not (MIN_YEAR <= y <= dt.date.today().year):
         return None, f"Год должен быть между {MIN_YEAR} и нынешним."
     return when, ""
+
+
+class AskIn(ChartIn):
+    question: str = ""
 
 
 def build_router(ask, rate_ok, client_ip) -> APIRouter:
@@ -651,5 +766,43 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             _cache_put("natal_readings", "key", key,
                        {k: v for k, v in payload.items() if k not in ("now", "tz_note")})
         return payload
+
+    @router.post("/ask")
+    def ask_endpoint(body: AskIn, request: Request):
+        if engine is None:
+            return {"error": "Расчёт временно недоступен."}
+        q = (body.question or "").strip()[:400]
+        if len(q) < 3:
+            return {"error": "Спросите что-нибудь."}
+        # Вопросы не кэшируются — каждый свой. Поэтому лимит строже,
+        # чем на расчёт карты: это единственное, что стоит денег на каждый заход.
+        if not rate_ok(client_ip(request), 8):
+            return {"error": "Слишком много вопросов подряд. Вернитесь через несколько минут."}
+
+        when, err = _parse_when(body)
+        if err:
+            return {"error": err}
+        tz = (body.tz or "").strip()
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            return {"error": "Не понял часовой пояс."}
+        if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
+            return {"error": "Координаты вне Земли."}
+
+        try:
+            ch = engine.chart(when, tz, body.lat, body.lon)
+        except Exception as e:
+            print(f"⚠️ Карта не посчиталась: {e}")
+            return {"error": "Расчёт не сошёлся."}
+        try:
+            tr = engine.transits(ch)
+        except Exception:
+            tr = None
+
+        text = answer_question(ch, tr, q, ask)
+        if not text:
+            return {"error": "Ответ не сложился. Попробуйте ещё раз."}
+        return {"question": q, "answer": text}
 
     return router
