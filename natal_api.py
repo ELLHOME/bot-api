@@ -447,8 +447,9 @@ def interpret(ch: dict, ask) -> dict:
         "чёрная луна истинная (тот же апогей без сглаживания)": d["lilith_true"],
         "значения домов": d["houses"],
     }
+    extra = FICT_WARNING if any(p.get("fictional") for p in ch["planets"]) else ""
     prompt = ("Факты карты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) +
-              "\n\nНапиши толкование по правилам. Только JSON.")
+              extra + "\n\nНапиши толкование по правилам. Только JSON.")
     try:
         raw = ask(prompt, system=SYSTEM_NATAL, temperature=0.9) or ""
     except Exception as e:
@@ -496,9 +497,23 @@ def now_facts(tr: dict) -> dict:
     }
 
 
-def interpret_now(tr: dict, ask) -> dict:
+# Одна и та же оговорка нужна в двух местах: и в разборе карты, и в разделе
+# «что сейчас». В авестийском режиме транзиты бьют и по Прозерпине с Селеной,
+# так что предупреждать надо оба раза, иначе в одном тексте они честные
+# конструкции, а в другом — молчаливые планеты.
+FICT_WARNING = (
+    "\n\nВАЖНО. Прозерпина и Селена — точки авестийской школы. Физических тел "
+    "за ними нет, их никто не наблюдал: это конструкции с назначенными орбитами. "
+    "Если упоминаешь их, скажи об этом прямо в том же абзаце, как говоришь про "
+    "поколенческие аспекты. Ни одного слова, из которого следует, что это планеты."
+)
+
+
+def interpret_now(tr: dict, ask, fict: bool = False) -> dict:
+    hits = " ".join(h["to"] for h in tr.get("hits", []))
+    warn = FICT_WARNING if fict and ("Прозерпина" in hits or "Селена" in hits) else ""
     prompt = ("Факты:\n" + json.dumps(now_facts(tr), ensure_ascii=False, indent=1) +
-              "\n\nНапиши раздел «что сейчас» по правилам. Только JSON.")
+              warn + "\n\nНапиши раздел «что сейчас» по правилам. Только JSON.")
     try:
         raw = ask(prompt, system=SYSTEM_NOW, temperature=0.9) or ""
         m = re.search(r"\{.*\}", raw, re.S)
@@ -625,7 +640,8 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask) -> str:
     }
     if tr:
         facts["сегодня"] = now_facts(tr)
-    prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) +
+    warn = FICT_WARNING if any(p.get("fictional") for p in ch["planets"]) else ""
+    prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) + warn +
               "\n\nВопрос человека: " + question.strip() +
               "\n\nОтветь по правилам.")
     try:
@@ -644,6 +660,9 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask) -> str:
 
 
 # ── Ручки ────────────────────────────────────────────────────────────
+SCHOOLS = ("classic", "avestan")
+
+
 class ChartIn(BaseModel):
     date: str = ""        # 1990-05-17
     time: str = "12:00"   # 10:50
@@ -652,6 +671,7 @@ class ChartIn(BaseModel):
     tz: str = ""
     place: str = ""       # как показать место в шапке
     unknown_time: bool = False
+    school: str = "classic"
 
 
 def _parse_when(body: ChartIn) -> tuple[dt.datetime, str] | tuple[None, str]:
@@ -702,7 +722,8 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
             return {"error": "Координаты вне Земли."}
 
-        key = (f"v{READING_V}|{body.date}|{body.time}|{round(body.lat, 3)}"
+        school = body.school if body.school in SCHOOLS else "classic"
+        key = (f"v{READING_V}|{school}|{body.date}|{body.time}|{round(body.lat, 3)}"
                f"|{round(body.lon, 3)}|{tz}|{int(bool(body.unknown_time))}")
         # Предупреждение про перевод стрелок считается заново на каждый ответ:
         # оно выводится из тех же данных и стоит доли миллисекунды, зато старые
@@ -712,7 +733,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         cached = _cache_get("natal_readings", "key", key)
 
         try:
-            ch = engine.chart(when, tz, body.lat, body.lon)
+            ch = engine.chart(when, tz, body.lat, body.lon, school=school)
         except Exception as e:
             print(f"⚠️ Карта не посчиталась: {e}")
             return {"error": "Расчёт не сошёлся. Проверьте дату и место."}
@@ -738,7 +759,8 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=2) as pool:
                 f_read = pool.submit(interpret, ch, ask) if cached is None else None
-                f_now = (pool.submit(interpret_now, tr, ask)
+                fict = any(p.get("fictional") for p in ch["planets"])
+                f_now = (pool.submit(interpret_now, tr, ask, fict)
                          if tr and now_cached is None else None)
                 reading = f_read.result() if f_read else (cached or {}).get("reading") or {}
                 now_text = f_now.result() if f_now else now_cached
@@ -793,7 +815,8 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             return {"error": "Координаты вне Земли."}
 
         try:
-            ch = engine.chart(when, tz, body.lat, body.lon)
+            ch = engine.chart(when, tz, body.lat, body.lon,
+                              school=body.school if body.school in SCHOOLS else "classic")
         except Exception as e:
             print(f"⚠️ Карта не посчиталась: {e}")
             return {"error": "Расчёт не сошёлся."}

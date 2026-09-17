@@ -86,7 +86,8 @@ RULER = {"Овен": ("Марс", ""), "Телец": ("Венера", ""), "Бл
 MEAN_SPEED = {"Солнце": 0.986, "Луна": 13.176, "Меркурий": 1.383, "Венера": 1.200,
               "Марс": 0.524, "Юпитер": 0.083, "Сатурн": 0.034, "Уран": 0.012,
               "Нептун": 0.006, "Плутон": 0.004, "Сев. узел": 0.053,
-              "Хирон": 0.019}   # оборот примерно за 50.7 года
+              "Хирон": 0.019,    # оборот примерно за 50.7 года
+              "Прозерпина": 0.004, "Селена": 0.141}
 
 PHASES = [(0, 12, "новолуние"), (12, 85, "растущий серп"), (85, 95, "первая четверть"),
           (95, 168, "растущая луна"), (168, 192, "полнолуние"),
@@ -109,7 +110,7 @@ def _fmt(lon: float) -> str:
 
 
 def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
-          hsys: bytes = b"P", fold: int = 0) -> dict:
+          hsys: bytes = b"P", fold: int = 0, school: str = "classic") -> dict:
     """when_local — местное время рождения, tz — зона вроде 'Europe/Moscow'.
 
     fold различает два прохода одного и того же часа в ночь перевода стрелок
@@ -123,7 +124,7 @@ def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
 
     cusps, ascmc = swe.houses(jd, lat, lon, hsys)
 
-    bodies = []
+    bodies: list[dict] = []
     for name, pid in PLANETS:
         pos, _ = swe.calc_ut(jd, pid, FLAGS)
         longitude, speed = pos[0] % 360, pos[3]
@@ -136,8 +137,14 @@ def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
             "house": _house_of(longitude, cusps),
         })
 
+    # В авестийском режиме Прозерпина и Селена — полноправные точки карты:
+    # идут в положения, в аспекты и на колесо. Что физических тел за ними нет,
+    # страница говорит отдельно и прямо; прятать это внутри расчёта нельзя.
+    if school == "avestan":
+        bodies.extend(avestan_bodies(jd, cusps))
+
     extra = _extras(jd, bodies, cusps, ascmc)
-    extra["fictional"] = fictional(jd, cusps)
+    extra["school"] = school
     return {
         "utc": utc.isoformat(),
         "jd": jd,
@@ -176,9 +183,9 @@ def _extras(jd, bodies, cusps, ascmc) -> dict:
     el_count, mo_count = {}, {}
     for b in bodies:
         # Расклад по стихиям и крестам принято считать по десяти планетам.
-        # Узел — не тело, Хирон в этот счёт традиционно не входит; добавь их —
-        # и суммы перестанут сходиться с любой книгой.
-        if b["name"] in ("Сев. узел", "Хирон"):
+        # Узел — не тело; Хирон, Прозерпина и Селена в этот счёт не входят
+        # ни в одной книге. Добавь их — и суммы перестанут с книгами сходиться.
+        if b["name"] in ("Сев. узел", "Хирон", "Прозерпина", "Селена"):
             continue
         el_count[ELEMENT[b["sign"]]] = el_count.get(ELEMENT[b["sign"]], 0) + 1
         mo_count[MODE[b["sign"]]] = mo_count.get(MODE[b["sign"]], 0) + 1
@@ -379,25 +386,28 @@ def transits(natal_chart: dict, when_utc: dt.datetime | None = None,
 # держим отдельно: ни в аспекты, ни в стихии, ни в колесо, ни в текст
 # толкования они не попадают. Иначе страница, которая обещает точную
 # астрономию, начнёт тихо подмешивать в неё невидимые планеты.
-FICTIONAL = []
-for _name, _attr in (("Прозерпина", "PROSERPINA"),
-                     ("Вулкан", "VULCAN"),
-                     ("Селена", "WHITE_MOON")):
+# Состав авестийской школы берём не на глаз: в ZET её режим включается,
+# когда в расчёт добавлены Хирон, Прозерпина и Белая Луна. Хирон у нас есть
+# всегда — он хотя бы существует. Добавляются только две точки.
+AVESTAN = []
+for _name, _attr in (("Прозерпина", "PROSERPINA"), ("Селена", "WHITE_MOON")):
     if hasattr(swe, _attr):
-        FICTIONAL.append((_name, getattr(swe, _attr)))
+        AVESTAN.append((_name, getattr(swe, _attr)))
 
 
-def fictional(jd: float, cusps) -> list[dict]:
+def avestan_bodies(jd: float, cusps) -> list[dict]:
     """Точки, за которыми нет физических тел. Пустой список — тоже ответ:
     нет файла орбит, нет и точек, а карта считается как считалась."""
     out = []
-    for name, pid in FICTIONAL:
+    for name, pid in AVESTAN:
         try:
             pos, _ = swe.calc_ut(jd, pid, FLAGS)
         except Exception:
             continue
         longitude = pos[0] % 360
+        s_, deg = _sign(longitude)
         out.append({"name": name, "lon": round(longitude, 4),
-                    "label": _fmt(longitude), "retro": pos[3] < 0,
-                    "house": _house_of(longitude, cusps)})
+                    "sign": s_, "deg": round(deg, 2), "label": _fmt(longitude),
+                    "retro": pos[3] < 0, "speed": round(pos[3], 5),
+                    "house": _house_of(longitude, cusps), "fictional": True})
     return out
