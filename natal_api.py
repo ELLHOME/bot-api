@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 2
+READING_V = 3
 
 try:
     import natal as engine
@@ -204,15 +204,39 @@ def digest(ch: dict) -> dict:
         })
     tight = [a for a in ch["aspects"] if a["exact"] <= 1.0]
     retro = [p["name"] for p in ch["planets"] if p["retro"]]
+
+    ph = ch.get("moon_phase") or {}
+    rl = ch.get("ruler") or {}
+    ang = [f"{a['a']} {a['type']} {a['b']}, расхождение {_arcmin(a['exact'])}"
+           for a in (ch.get("angle_aspects") or [])[:8]]
+    el = ch.get("elements") or {}
+    missing = [e for e in ("огонь", "земля", "воздух", "вода") if not el.get(e)]
+
     return {
         "asc": ch["asc"]["label"],
         "mc": ch["mc"]["label"],
         "sun": by["Солнце"], "moon": by["Луна"],
         "positions": lines,
         "aspects": asp,
+        "angle_aspects": ang,
         "tight": [f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})" for a in tight],
         "retro": retro,
         "houses": HOUSE_MEANS,
+        "moon_phase": (f"{ph.get('name','')}, освещено {ph.get('illum','?')}% диска, "
+                       f"Луна отошла от Солнца на {ph.get('angle','?')}°") if ph else "",
+        "sector": ("дневная карта: Солнце над горизонтом"
+                   if ch.get("day_chart") else "ночная карта: Солнце под горизонтом"),
+        "ruler": (f"управитель асцендента — {rl.get('planet','')}"
+                  + (f" (в старой традиции {rl['classic']})" if rl.get("classic") else "")
+                  + (f", стоит {rl.get('label','')} в доме {rl.get('house','')}"
+                     if rl.get("label") else "")) if rl else "",
+        "elements": el,
+        "elements_missing": missing,
+        "modes": ch.get("modes") or {},
+        "stelliums": [f"{g['where']}: {', '.join(g['who'])}"
+                      for g in (ch.get("stelliums") or [])],
+        "stations": ch.get("stations") or [],
+        "lilith": (ch.get("lilith") or {}).get("label", ""),
     }
 
 
@@ -262,9 +286,12 @@ SYSTEM_NATAL = (
     "выделенного **жирным**. Больше никакой разметки.\n"
     "\n"
     "Формат ответа — строго JSON без пояснений:\n"
-    '{"blocks": ["абзац", "абзац", "абзац", "абзац"], '
+    '{"blocks": ["абзац", "абзац", "абзац", "абзац", "абзац", "абзац"], '
     '"verdict": "две строки через \\n"}\n'
-    "Абзацев четыре или пять. Вердикт — ровно две короткие строки: "
+    "Абзацев шесть или семь, и они не должны быть про одно и то же: возьми разные "
+    "стороны карты — точный аспект, положение в доме, аспект к асценденту или MC, "
+    "фазу Луны, перекос по стихиям или пустую стихию, скопление планет в одном знаке, "
+    "планету на станции. Вердикт — ровно две короткие строки: "
     "«Степень опасности: <одно слово>.» и «Рекомендация: <полстроки>.» "
     "Рекомендация не про жизнь, а про обращение с этим текстом."
 )
@@ -307,8 +334,18 @@ def interpret(ch: dict, ask) -> dict:
             (a["text"] + (" — ПОКОЛЕНЧЕСКИЙ" if a["generational"] else ""))
             for a in d["aspects"]
         ],
+        "аспекты к углам карты": d["angle_aspects"],
         "особо точные": d["tight"],
         "ретроградные": d["retro"],
+        "на станции (почти стоят, скоро развернутся)": d["stations"],
+        "фаза Луны": d["moon_phase"],
+        "время суток": d["sector"],
+        "управитель": d["ruler"],
+        "стихии": d["elements"],
+        "стихии без единого тела": d["elements_missing"],
+        "кресты": d["modes"],
+        "скопления": d["stelliums"],
+        "чёрная луна (апогей орбиты Луны)": d["lilith"],
         "значения домов": d["houses"],
     }
     prompt = ("Факты карты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) +
@@ -325,7 +362,7 @@ def interpret(ch: dict, ask) -> dict:
         out = json.loads(m.group(0))
     except Exception:
         return {**_fallback_reading(d), "lead": lead}
-    blocks = [str(b)[:1200] for b in (out.get("blocks") or [])][:6]
+    blocks = [str(b)[:1200] for b in (out.get("blocks") or [])][:8]
     verdict = str(out.get("verdict") or "")[:300]
     if not blocks:
         return {**_fallback_reading(d), "lead": lead}

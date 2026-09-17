@@ -29,6 +29,44 @@ PLANETS = [
 ASPECTS = [("соединение", 0, 8), ("секстиль", 60, 5), ("квадрат", 90, 7),
            ("тригон", 120, 7), ("оппозиция", 180, 8)]
 
+# К углам карты орбы уже: асцендент и MC — точки, а не тела,
+# и широкий аспект к ним мало что значит.
+ANGLE_ASPECTS = [("соединение", 0, 6), ("секстиль", 60, 3), ("квадрат", 90, 5),
+                 ("тригон", 120, 5), ("оппозиция", 180, 6)]
+
+ELEMENT = {"Овен": "огонь", "Лев": "огонь", "Стрелец": "огонь",
+           "Телец": "земля", "Дева": "земля", "Козерог": "земля",
+           "Близнецы": "воздух", "Весы": "воздух", "Водолей": "воздух",
+           "Рак": "вода", "Скорпион": "вода", "Рыбы": "вода"}
+
+MODE = {"Овен": "кардинальный", "Рак": "кардинальный", "Весы": "кардинальный",
+        "Козерог": "кардинальный",
+        "Телец": "фиксированный", "Лев": "фиксированный",
+        "Скорпион": "фиксированный", "Водолей": "фиксированный",
+        "Близнецы": "подвижный", "Дева": "подвижный",
+        "Стрелец": "подвижный", "Рыбы": "подвижный"}
+
+# Управитель знака. Для трёх знаков современная традиция назначила новые
+# планеты, открытые после телескопа; старого управителя держим рядом,
+# чтобы не выдавать одну школу за единственную.
+RULER = {"Овен": ("Марс", ""), "Телец": ("Венера", ""), "Близнецы": ("Меркурий", ""),
+         "Рак": ("Луна", ""), "Лев": ("Солнце", ""), "Дева": ("Меркурий", ""),
+         "Весы": ("Венера", ""), "Скорпион": ("Плутон", "Марс"),
+         "Стрелец": ("Юпитер", ""), "Козерог": ("Сатурн", ""),
+         "Водолей": ("Уран", "Сатурн"), "Рыбы": ("Нептун", "Юпитер")}
+
+# Средняя суточная скорость по эклиптике. Нужна, чтобы отличить планету
+# «на станции» — в точке разворота она почти стоит, и это видимое событие,
+# а не толкование.
+MEAN_SPEED = {"Солнце": 0.986, "Луна": 13.176, "Меркурий": 1.383, "Венера": 1.200,
+              "Марс": 0.524, "Юпитер": 0.083, "Сатурн": 0.034, "Уран": 0.012,
+              "Нептун": 0.006, "Плутон": 0.004, "Сев. узел": 0.053}
+
+PHASES = [(0, 12, "новолуние"), (12, 85, "растущий серп"), (85, 95, "первая четверть"),
+          (95, 168, "растущая луна"), (168, 192, "полнолуние"),
+          (192, 265, "убывающая луна"), (265, 275, "последняя четверть"),
+          (275, 348, "старый серп"), (348, 361, "новолуние")]
+
 
 def _sign(lon: float) -> tuple[str, float]:
     lon %= 360
@@ -68,19 +106,104 @@ def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
             "name": name, "lon": round(longitude, 4),
             "sign": s, "deg": round(deg, 2), "label": _fmt(longitude),
             "retro": speed < 0,
+            "speed": round(speed, 5),
             "house": _house_of(longitude, cusps),
         })
 
+    extra = _extras(jd, bodies, cusps, ascmc)
     return {
         "utc": utc.isoformat(),
         "jd": jd,
         "planets": bodies,
+        **extra,
         "houses": [{"n": i + 1, "lon": round(c % 360, 4), "label": _fmt(c)}
                    for i, c in enumerate(cusps)],
         "asc": {"lon": round(ascmc[0] % 360, 4), "label": _fmt(ascmc[0])},
         "mc": {"lon": round(ascmc[1] % 360, 4), "label": _fmt(ascmc[1])},
         "aspects": _aspects(bodies),
+        "angle_aspects": _angle_aspects(bodies, ascmc),
     }
+
+
+def _extras(jd, bodies, cusps, ascmc) -> dict:
+    """Всё, что даёт та же эфемерида, но обычно остаётся за кадром."""
+    import math
+    by = {b["name"]: b for b in bodies}
+
+    # Фаза Луны: угол между Луной и Солнцем. Доля освещённого диска — из него же,
+    # и сверена с pheno_ut, когда тот доступен.
+    el = (by["Луна"]["lon"] - by["Солнце"]["lon"]) % 360
+    illum = (1 - math.cos(math.radians(el))) / 2
+    phase = next(n for a, b, n in PHASES if a <= el < b)
+
+    # Дневная карта или ночная: Солнце над горизонтом или под ним.
+    # Над горизонтом — дома с седьмого по двенадцатый.
+    day = 7 <= by["Солнце"]["house"] <= 12
+
+    asc_sign = _sign(ascmc[0])[0]
+    rul, old = RULER[asc_sign]
+    ruler = {"sign": asc_sign, "planet": rul, "classic": old,
+             "label": by[rul]["label"] if rul in by else "",
+             "house": by[rul]["house"] if rul in by else 0}
+
+    el_count, mo_count = {}, {}
+    for b in bodies:
+        if b["name"] == "Сев. узел":       # узел не тело, в раскладе не участвует
+            continue
+        el_count[ELEMENT[b["sign"]]] = el_count.get(ELEMENT[b["sign"]], 0) + 1
+        mo_count[MODE[b["sign"]]] = mo_count.get(MODE[b["sign"]], 0) + 1
+
+    # Стеллиум — три и более тела в одном знаке или доме. Скопление видно
+    # на карте глазом, и его стоит назвать.
+    groups = {}
+    for b in bodies:
+        groups.setdefault(("знак", b["sign"]), []).append(b["name"])
+        groups.setdefault(("дом", b["house"]), []).append(b["name"])
+    stelliums = [{"where": f"{k[0]} {k[1]}", "who": v}
+                 for k, v in groups.items() if len(v) >= 3]
+
+    # Планета на станции: скорость упала ниже десятой доли обычной,
+    # то есть в ближайшие дни она развернётся.
+    stations = [b["name"] for b in bodies
+                if MEAN_SPEED.get(b["name"]) and
+                abs(b["speed"]) < MEAN_SPEED[b["name"]] * 0.1]
+
+    lilith = None
+    try:
+        pos, _ = swe.calc_ut(jd, swe.MEAN_APOG, FLAGS)
+        lilith = {"lon": round(pos[0] % 360, 4), "label": _fmt(pos[0]),
+                  "house": _house_of(pos[0] % 360, cusps)}
+    except Exception:
+        pass
+
+    return {
+        "moon_phase": {"angle": round(el, 2), "illum": round(illum * 100),
+                       "name": phase},
+        "day_chart": day,
+        "ruler": ruler,
+        "elements": el_count,
+        "modes": mo_count,
+        "stelliums": stelliums,
+        "stations": stations,
+        "lilith": lilith,
+    }
+
+
+def _angle_aspects(bodies: list[dict], ascmc) -> list[dict]:
+    """Аспекты планет к асценденту и середине неба."""
+    out = []
+    for label, lon in (("ASC", ascmc[0] % 360), ("MC", ascmc[1] % 360)):
+        for b in bodies:
+            diff = abs(b["lon"] - lon) % 360
+            if diff > 180:
+                diff = 360 - diff
+            for title, angle, orb in ANGLE_ASPECTS:
+                delta = abs(diff - angle)
+                if delta <= orb:
+                    out.append({"a": b["name"], "b": label, "type": title,
+                                "exact": round(delta, 2)})
+                    break
+    return sorted(out, key=lambda x: x["exact"])
 
 
 def _house_of(longitude: float, cusps) -> int:
