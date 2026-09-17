@@ -118,7 +118,7 @@ def _geo_fetch(q: str, lang: str) -> list[dict]:
     import urllib.request
     import urllib.parse
     url = GEO_API + "?" + urllib.parse.urlencode(
-        {"name": q, "count": 8, "language": lang, "format": "json"})
+        {"name": q, "count": 20, "language": lang, "format": "json"})
     req = urllib.request.Request(url, headers={"User-Agent": GEO_UA,
                                                "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=GEO_TIMEOUT) as r:
@@ -136,9 +136,25 @@ def _geo_fetch(q: str, lang: str) -> list[dict]:
             "tz": it["timezone"],
             "pop": int(it.get("population") or 0),
         })
-    # крупные города выше: человек, набравший «Москва», имеет в виду ту самую
-    out.sort(key=lambda c: -c["pop"])
-    return out[:6]
+    return out
+
+
+def rank_places(places: list[dict], q: str, limit: int = 7) -> list[dict]:
+    """Сортировка подсказок.
+
+    По населению сортировать нельзя: деревню, которая называется как
+    известный город, оно утопит ниже списка, и человек решит, что его
+    места в базе нет. Сначала точное совпадение названия, потом начало
+    слова, и только внутри каждой группы — по населению.
+    """
+    ql = (q or "").strip().lower()
+
+    def rank(c):
+        n = (c.get("name") or "").strip().lower()
+        grade = 0 if n == ql else 1 if n.startswith(ql) else 2
+        return (grade, -int(c.get("pop") or 0))
+
+    return sorted(places, key=rank)[:limit]
 
 
 def geo_search(q: str) -> list[dict]:
@@ -153,7 +169,7 @@ def geo_search(q: str) -> list[dict]:
     if hit is not None:
         return hit
     try:
-        res = _geo_fetch(q, lang)
+        res = rank_places(_geo_fetch(q, lang), q)
     except Exception as e:
         print(f"⚠️ Геокодер недоступен: {e}")
         return []
