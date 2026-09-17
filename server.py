@@ -256,6 +256,7 @@ EVENT_NAMES = {
     "page_view", "section_view", "lang_switch",
     "chat_open", "chat_tab", "chat_message", "chat_copy",
     "contact_click", "project_view",
+    "natal_chart",
 }
 _events_ready = False
 
@@ -1122,6 +1123,20 @@ app.add_middleware(
 )
 
 
+# Натальная карта — отдельный продукт, живёт в своём файле.
+# Если модуль не поднялся (нет pyswisseph), API работает как раньше:
+# страница карты просто скажет, что расчёт недоступен.
+try:
+    from natal_api import build_router as _natal_router
+    app.include_router(_natal_router(ask=ask, rate_ok=_rate_ok, client_ip=_client_ip))
+    NATAL_READY = True
+    NATAL_ERROR = ""
+except Exception as _e:          # pragma: no cover
+    NATAL_READY = False
+    NATAL_ERROR = str(_e)
+    print(f"⚠️ Натальная карта не подключилась: {_e}")
+
+
 class Msg(BaseModel):
     role: str
     content: str
@@ -1150,6 +1165,7 @@ def health():
         "telegram": {"token": bool(TG_TOKEN), "chat": bool(TG_CHAT),
                      "last": LAST_NOTIFY, "webhook_secret": bool(TG_SECRET)},
         "database": bool(DATABASE_URL),
+        "natal": {"ready": NATAL_READY, "error": NATAL_ERROR},
     }
 
 
