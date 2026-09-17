@@ -197,13 +197,21 @@ def _extras(jd, bodies, cusps, ascmc) -> dict:
                 if MEAN_SPEED.get(b["name"]) and
                 abs(b["speed"]) < MEAN_SPEED[b["name"]] * 0.1]
 
-    lilith = None
-    try:
-        pos, _ = swe.calc_ut(jd, swe.MEAN_APOG, FLAGS)
-        lilith = {"lon": round(pos[0] % 360, 4), "label": _fmt(pos[0]),
-                  "house": _house_of(pos[0] % 360, cusps)}
-    except Exception:
-        pass
+    # Чёрная Луна — не тело, а апогей лунной орбиты, самая дальняя точка.
+    # Считают её двояко: усреднённо, по сглаженной орбите, и «истинно» —
+    # мгновенное положение апогея со всеми качаниями. Расходятся они сильно,
+    # иногда на полкруга, и спор о том, какую брать, идёт десятилетиями.
+    # Честнее показать обе, чем молча выбрать сторону.
+    def _point(pid):
+        try:
+            pos, _ = swe.calc_ut(jd, pid, FLAGS)
+            return {"lon": round(pos[0] % 360, 4), "label": _fmt(pos[0]),
+                    "house": _house_of(pos[0] % 360, cusps)}
+        except Exception:
+            return None
+
+    lilith = _point(swe.MEAN_APOG)
+    lilith_true = _point(swe.OSCU_APOG)
 
     return {
         "moon_phase": {"angle": round(el, 2), "illum": round(illum * 100),
@@ -215,6 +223,7 @@ def _extras(jd, bodies, cusps, ascmc) -> dict:
         "stelliums": stelliums,
         "stations": stations,
         "lilith": lilith,
+        "lilith_true": lilith_true,
     }
 
 
