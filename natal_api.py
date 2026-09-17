@@ -678,7 +678,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
 
     @router.get("/suggest")
     def suggest(q: str = "", request: Request = None):
-        if request is not None and not rate_ok(client_ip(request), 60):
+        if request is not None and not rate_ok(client_ip(request), 60, "geo"):
             return {"cities": [], "error": "Слишком часто. Подождите минуту."}
         return {"cities": geo_search(q)}
 
@@ -686,7 +686,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
     def chart_endpoint(body: ChartIn, request: Request):
         if engine is None:
             return {"error": "Расчёт временно недоступен: " + ENGINE_ERROR}
-        if not rate_ok(client_ip(request), 20):
+        if not rate_ok(client_ip(request), 20, "natal"):
             return {"error": "Слишком много запросов подряд. Попробуйте через несколько минут."}
 
         when, err = _parse_when(body)
@@ -776,7 +776,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             return {"error": "Спросите что-нибудь."}
         # Вопросы не кэшируются — каждый свой. Поэтому лимит строже,
         # чем на расчёт карты: это единственное, что стоит денег на каждый заход.
-        if not rate_ok(client_ip(request), 8):
+        if not rate_ok(client_ip(request), 8, "ask"):
             return {"error": "Слишком много вопросов подряд. Вернитесь через несколько минут."}
 
         when, err = _parse_when(body)

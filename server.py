@@ -90,15 +90,24 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _rate_ok(ip: str, limit: int | None = None) -> bool:
+def _rate_ok(ip: str, limit: int | None = None, bucket: str = "") -> bool:
+    """Счётчик обращений с одного адреса.
+
+    bucket разводит разные вещи по разным счётчикам. Без него выходило так:
+    страница при загрузке шлёт событие счётчика, потом подсказки городов на
+    каждую букву, потом расчёт карты — и на вопрос к карте с её лимитом
+    в восемь обращений места уже не остаётся. Считать их вместе нельзя:
+    это разные действия с разной ценой.
+    """
     now = time.time()
     cap = RATE_MAX if limit is None else limit
-    hits = [t for t in _hits.get(ip, []) if now - t < RATE_WINDOW]
+    key = f"{bucket}|{ip}" if bucket else ip
+    hits = [t for t in _hits.get(key, []) if now - t < RATE_WINDOW]
     if len(hits) >= cap:
-        _hits[ip] = hits
+        _hits[key] = hits
         return False
     hits.append(now)
-    _hits[ip] = hits
+    _hits[key] = hits
     if len(_hits) > 500:   # лёгкая уборка старых записей
         for k in [k for k, v in _hits.items() if not any(now - t < RATE_WINDOW for t in v)]:
             _hits.pop(k, None)
@@ -1094,7 +1103,7 @@ def handle_tg_update(update: dict) -> None:
         _tg_send(chat_id, "Такой команды нет. Есть /mode — выбрать собеседника.")
         return
 
-    if not _rate_ok("tg:" + chat_id):
+    if not _rate_ok(chat_id, None, "telegram"):
         _tg_send(chat_id, "Слишком много сообщений подряд — вернитесь через пару минут.")
         return
 
@@ -1194,7 +1203,7 @@ async def tg_webhook(request: Request):
 def event_endpoint(body: EventIn, request: Request):
     """Событие с сайта. Отдаёт 200 всегда: счётчик не должен мешать странице."""
     # лимит свободнее, чем у чата: событий за визит бывает десяток
-    if not _rate_ok("ev:" + _client_ip(request), limit=EVENT_RATE_MAX):
+    if not _rate_ok(_client_ip(request), EVENT_RATE_MAX, "event"):
         return {"ok": False, "skipped": "rate"}
     # чистим то, что прислал браузер: не больше десяти полей, короткие значения
     props = {
@@ -1212,7 +1221,7 @@ def chat_endpoint(body: ChatIn, request: Request):
     if not message:
         return {"reply": "", "category": "empty", "lead": None, "mode": body.mode}
 
-    if not _rate_ok(_client_ip(request)):
+    if not _rate_ok(_client_ip(request), None, "chat"):
         ru = any("\u0400" <= ch <= "\u04ff" for ch in message)
         return {
             "reply": ("Слишком много сообщений подряд — попробуйте, пожалуйста, через несколько минут. "
