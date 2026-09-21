@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 7
+READING_V = 8
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -557,8 +557,9 @@ SYSTEM_PROFILE = (
     "КАК ПИСАТЬ КАЖДЫЙ РАЗДЕЛ:\n"
     "— Первая фраза — вывод, прямой ответ на тему раздела, выделенный **жирным**. "
     "Не факт, а вывод: «Вам нужна работа…», «Вы влюбляетесь медленно…».\n"
-    "— Потом — на чём вывод держится: какие именно положения карты, с числами "
-    "из выданных фактов.\n"
+    "— Потом — на чём вывод держится: какие именно положения карты. Называй их "
+    "словами — «Меркурий в точном квадрате к середине неба» — без градусов и "
+    "минут: точные числа стоят в таблице рядом, в тексте они только мешают.\n"
     "— Потом — как это выглядит в жизни, обычными словами, с бытовым примером.\n"
     "— Два абзаца, всего 90–150 слов. Опирайся на два-три самых весомых фактора "
     "темы, а не перечисляй все.\n"
@@ -649,7 +650,8 @@ def _fallback_reading(d: dict) -> dict:
 
 
 def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
-                  sig: list | None = None) -> dict:
+                  sig: list | None = None, ch: dict | None = None,
+                  time_known: bool = True) -> dict:
     facts = {TOPIC_HINT[i]: t[i] for i in part["ids"]}
     if sig:
         facts = {"самое редкое в карте — точные углы к асценденту и MC": sig, **facts}
@@ -657,8 +659,10 @@ def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
               json.dumps(facts, ensure_ascii=False, indent=1) + unknown_note + fict_warn +
               "\n\nНапиши по разделу на каждую тему. " + part["extra"] +
               "\n\nФормат ответа — строго JSON без пояснений:\n" + part["shape"])
+    need = must_mention(ch, time_known, part["ids"]) if ch is not None else []
     try:
-        raw = ask(prompt, system=SYSTEM_PROFILE, temperature=0.85) or ""
+        raw = guarded(ask, prompt, SYSTEM_PROFILE, prompt, need,
+                      temperature=0.6, json_mode=True)
     except Exception as e:
         print(f"⚠️ Разбор {part['ids']} не сгенерировался: {e}")
         return {}
@@ -669,7 +673,16 @@ def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
         out = json.loads(m.group(0))
     except Exception:
         return {}
-    return out if isinstance(out, dict) else {}
+    if not isinstance(out, dict):
+        return {}
+    # что не исправилось с повтора — вычищаем по предложениям
+    secs = out.get("sections")
+    if isinstance(secs, dict):
+        out["sections"] = {k: (strip_bad(v, prompt) if isinstance(v, str) else v)
+                           for k, v in secs.items()}
+    if isinstance(out.get("summary"), str):
+        out["summary"] = strip_bad(out["summary"], prompt)
+    return out
 
 
 def interpret(ch: dict, ask, time_known: bool = True) -> dict:
@@ -686,7 +699,8 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(PROFILE_PARTS)) as pool:
         sig = signature(ch, time_known)
-        outs = list(pool.map(lambda p: _profile_part(p, t, fict, unknown, ask, sig),
+        outs = list(pool.map(lambda p: _profile_part(p, t, fict, unknown, ask, sig,
+                                                      ch, time_known),
                              PROFILE_PARTS))
 
     titles = dict(THEMES)
@@ -729,6 +743,143 @@ def _trust_hits(tr: dict | None, time_known: bool) -> dict | None:
     if not tr or time_known:
         return tr
     return {**tr, "hits": [h for h in tr["hits"] if h["to"] not in ("ASC", "MC", "Луна")]}
+
+
+# ── Проверка ответа модели ───────────────────────────────────────────
+# Модель подделывает числа, даже когда все настоящие ей выданы: писала
+# «квадрат Солнца к Луне с орбом 23 минуты» при настоящих 3,12°, и «тригон
+# 9 октября» при точном угле 8 августа. Правилом в промпте это не лечится,
+# поэтому ответ проверяет код. Градусы и минуты в тексте запрещены совсем —
+# точные числа стоят в таблицах рядом. Даты разрешены, но только те, что
+# есть в выданных фактах.
+_MONTHS = ("январ", "феврал", "март", "апрел", "ма", "июн",
+           "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
+DATE_RE = re.compile(r"\b(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[йя]\b|"
+                     r"июн\w*|июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)", re.I)
+ORB_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:°|′|″|угл\w*\s+минут\w*|минут\w*\s+дуги|"
+                    r"градус\w*|угловых\s+секунд\w*|секунд\w*\s+дуги)", re.I)
+# «орбисом в 23 минуты» — «минут» без слова «угловых» тоже орб, если рядом орб/угол/расхождение
+ORB_WORDY_RE = re.compile(r"(?:\b(?:с|со|при)\s+)?(?:орб\w*|расхожден\w*|точн\w*)\s+(?:в\s+|до\s+|около\s+)?"
+                          r"\d+(?:[.,]\d+)?\s*минут\w*", re.I)
+
+STEMS = {"Солнце": ("солнц",), "Луна": ("лун",), "Меркурий": ("меркури",),
+         "Венера": ("венер",), "Марс": ("марс",), "Юпитер": ("юпитер",),
+         "Сатурн": ("сатурн",), "Уран": ("уран",), "Нептун": ("нептун",),
+         "Плутон": ("плутон",), "Хирон": ("хирон",), "Сев. узел": ("узел", "узл"),
+         "MC": ("mc", "середин"), "ASC": ("asc", "асцендент")}
+
+
+def _date_key(day: str, month: str) -> tuple[int, int]:
+    m = month.lower()
+    for i, stem in enumerate(_MONTHS):
+        if m.startswith(stem):
+            return int(day), i
+    return int(day), -1
+
+
+def fact_dates(facts_text: str) -> set:
+    return {_date_key(d, m) for d, m in DATE_RE.findall(facts_text)}
+
+
+def problems(text: str, facts_text: str) -> list[str]:
+    out = []
+    for m in list(ORB_RE.finditer(text)) + list(ORB_WORDY_RE.finditer(text)):
+        out.append(f"«{m.group(0).strip()}» — градусов и минут в тексте быть не должно")
+    known = fact_dates(facts_text)
+    for m in DATE_RE.finditer(text):
+        if _date_key(m.group(1), m.group(2)) not in known:
+            out.append(f"«{m.group(0)}» — такой даты в фактах нет")
+    return list(dict.fromkeys(out))
+
+
+def mentions(text: str, a: dict) -> bool:
+    low = text.lower()
+    return all(any(s in low for s in STEMS.get(n, (n.lower(),))) for n in (a["a"], a["b"]))
+
+
+def strip_bad(text: str, facts_text: str) -> str:
+    """Последний рубеж: выкидываем предложения, где осталось поддельное число."""
+    known = fact_dates(facts_text)
+    def bad(s: str) -> bool:
+        if ORB_RE.search(s) or ORB_WORDY_RE.search(s):
+            return True
+        return any(_date_key(d, m) not in known for d, m in DATE_RE.findall(s))
+    paras = []
+    for p in re.split(r"\n{2,}", text):
+        parts = re.split(r"(?<=[.!?…])\s+|(?<=[.!?…]\*\*)\s+", p.strip())
+        keep = [s for s in parts if s and not bad(s)]
+        # жирный вывод в начале абзаца не теряем, даже если в нём число: чиним сам вывод
+        if parts and parts[0].startswith("**") and parts[0] not in keep:
+            s = ORB_WORDY_RE.sub("", ORB_RE.sub("", parts[0]))
+            s = DATE_RE.sub(lambda m: m.group(0) if _date_key(m.group(1), m.group(2)) in known
+                            else "", s)
+            s = re.sub(r"\s+\d{4}\s+года", "", s) if s != parts[0] else s
+            s = re.sub(r"\s+([.,:;!?*])", r"\1", re.sub(r"\s{2,}", " ", s))
+            s = re.sub(r"\b(с|в|до|около|на)\s*([.,:;])", r"\2", s)
+            keep.insert(0, s)
+        if keep:
+            paras.append(" ".join(keep))
+    return "\n\n".join(paras)
+
+
+def signature_raw(ch: dict, time_known: bool = True) -> list[dict]:
+    if not time_known:
+        return []
+    return sorted((a for a in (ch.get("angle_aspects") or []) if a["exact"] < 2.0),
+                  key=lambda a: a["exact"])[:4]
+
+
+def must_mention(ch: dict, time_known: bool, topics) -> list[dict]:
+    """Какой редкий факт ответ обязан упомянуть: аспект к MC — в теме работы,
+    к асценденту — в теме характера. Самый точный из подходящих, и только
+    если он правда точный (меньше градуса)."""
+    need = []
+    for a in signature_raw(ch, time_known):
+        if a["exact"] >= 1.0:
+            continue
+        if (a["b"] == "MC" and "work" in topics) or (a["b"] == "ASC" and "character" in topics):
+            need.append(a)
+    return need[:1]
+
+
+TOPIC_WORDS = {
+    "work": ("работ", "профес", "карьер", "призван", "бизнес", "заня", "деньг",
+             "зарабат", "должност", "начальн", "уволь", "специальн", "делом"),
+    "love": ("любов", "отношен", "партн", "муж", "жен", "брак", "свидан", "влюб", "семь"),
+    "character": ("характер", "какой я", "какая я", "кто я", "личност", "темперамент"),
+    "feelings": ("чувств", "эмоц", "тревог", "спокой", "настроен"),
+    "mind": ("учёб", "учеб", "учить", "мышлен", "общени", "язык"),
+    "growth": ("сильн", "слаб", "талант", "способн"),
+}
+
+
+def topics_of(question: str) -> list[str]:
+    q = " " + question.lower() + " "
+    return [k for k, words in TOPIC_WORDS.items() if any(w in q for w in words)]
+
+
+def guarded(ask, prompt: str, system: str, facts_text: str, need: list[dict],
+            temperature: float = 0.5, json_mode: bool = False) -> str:
+    """Спрашиваем модель, проверяем ответ, при ошибках — один повтор с
+    разбором ошибок, и в конце вычищаем то, что так и не исправилось."""
+    raw = (ask(prompt, system=system, temperature=temperature) or "").strip()
+    if raw.startswith("⚠️"):
+        return raw
+    probs = problems(raw, facts_text)
+    for a in need:
+        if not mentions(raw, a):
+            probs.append(f"не упомянут самый редкий факт карты: {a['a']} {a['type']} {a['b']} — "
+                         "он держится считанные минуты, ответ обязан на него опереться")
+    if probs:
+        fix = (prompt + "\n\nТвой прошлый ответ:\n" + raw + "\n\nВ нём ошибки:\n- " +
+               "\n- ".join(probs) + "\n\nИсправь их и верни ответ целиком в том же формате. "
+               "Остальное не меняй.")
+        again = (ask(fix, system=system, temperature=0.3) or "").strip()
+        if again and not again.startswith("⚠️"):
+            raw = again
+    if json_mode:
+        return raw          # чистку по предложениям делаем после разбора JSON
+    return strip_bad(raw, facts_text)
 
 
 def _ru_date(iso: str) -> str:
@@ -881,7 +1032,10 @@ SYSTEM_ASK = (
     "юристом или финансистом.\n"
     "\n"
     "ЗАПРЕЩЕНО:\n"
-    "1. Придумывать знаки, дома, градусы и даты. Только выданные факты.\n"
+    "1. Придумывать знаки, дома и даты. Даты транзитов пиши ровно такими, как "
+    "выданы, и только рядом с тем событием, к которому они относятся. Градусов, "
+    "минут и орбов в тексте не пиши вовсе — они есть в таблице на странице. "
+    "Ответ проверяется программой: выдуманная дата или число будут вырезаны.\n"
     "2. Обещать события и исходы: «он вернётся», «вас повысят», «разбогатеете».\n"
     "3. Пугать, льстить и набивать цену. Никакой мистики, «кармы» и «вы особенный».\n"
     "4. Повторять оговорку, что астрология не наука, — она уже есть на странице.\n"
@@ -909,9 +1063,13 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask,
                     time_known: bool = True, history: list | None = None) -> str:
     t = themes(ch, time_known)
     sig = signature(ch, time_known)
+    # Вопрос про работу — отдаём факты про работу, а не всю карту: из шести
+    # тем модель выбирала то, что ярче звучит, а не то, что относится к делу.
+    topics = topics_of(question)
+    pick = (["character"] + [k for k in topics if k != "character"]) if topics else list(t)
     facts = {
         **({"самое редкое в карте — точные углы к асценденту и MC": sig} if sig else {}),
-        "карта рождения по темам": {TOPIC_HINT[k]: v for k, v in t.items()},
+        "карта рождения по темам": {TOPIC_HINT[k]: t[k] for k in pick},
         "самые точные аспекты": [
             _asp(a) for a in ch["aspects"][:6]],
     }
@@ -939,8 +1097,9 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask,
     prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) + note + warn +
               talk + "\n\nВопрос человека: " + question.strip() +
               "\n\nОтветь по правилам.")
+    need = must_mention(ch, time_known, topics or ["work", "character"])
     try:
-        out = (ask(prompt, system=SYSTEM_ASK, temperature=0.8) or "").strip()
+        out = guarded(ask, prompt, SYSTEM_ASK, prompt, need, temperature=0.5)
     except Exception as e:
         print(f"⚠️ Ответ на вопрос не сгенерировался: {e}")
         return ""
