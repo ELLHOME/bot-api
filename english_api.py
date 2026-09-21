@@ -14,10 +14,15 @@
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
+import struct
+import urllib.request
+from collections import OrderedDict
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 LEVELS = ("A1", "A2", "B1", "B2", "C1")
@@ -205,6 +210,77 @@ def talk(history: list[dict], level: str, topic: str, ask) -> dict:
     return clean(out, last_user, len(user_msgs))
 
 
+# ── Озвучка ──────────────────────────────────────────────────────────
+# Голос браузера зависит от системы. На русской Windows английского голоса
+# часто нет вовсе, и браузер читает «interesting» русским голосом —
+# «интерестинг». Для урока произношения это хуже, чем тишина. Поэтому
+# говорим голосом модели: одинаково на любом устройстве.
+TTS_MODELS = [m for m in (os.getenv("GEMINI_TTS_MODEL"), "gemini-3.1-flash-tts-preview",
+                          "gemini-2.5-flash-preview-tts") if m]
+TTS_VOICE = os.getenv("GEMINI_TTS_VOICE", "Kore")
+TTS_RATE = 24000                 # модель отдаёт сырой PCM: 16 бит, 24 кГц, моно
+TTS_MAX = 400
+_tts_cache: "OrderedDict[str, bytes]" = OrderedDict()
+TTS_CACHE_SIZE = 300             # ~300 коротких фраз — порядка 60 МБ в худшем случае
+
+
+def wav(pcm: bytes, rate: int = TTS_RATE) -> bytes:
+    """Сырой PCM браузер не проиграет — оборачиваем в заголовок WAV."""
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def _tts_request(model: str, text: str, slow: bool, key: str, opener=None) -> bytes:
+    style = ("Read slowly and very clearly, like a patient English teacher speaking to a beginner"
+             if slow else "Read naturally and clearly in American English")
+    body = {
+        "contents": [{"parts": [{"text": f"{style}: {text}"}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": TTS_VOICE}}},
+        },
+    }
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    with (opener or urllib.request.urlopen)(req, timeout=30) as r:
+        d = json.loads(r.read())
+    part = d["candidates"][0]["content"]["parts"][0]["inlineData"]
+    return base64.b64decode(part["data"])
+
+
+def speak(text: str, slow: bool, opener=None) -> bytes | None:
+    text = re.sub(r"\*\*", "", text or "").strip()[:TTS_MAX]
+    # Озвучиваем только английский: русскую подсказку этот голос прочтёт плохо,
+    # а просить его об этом незачем — её читают глазами.
+    if not text or _CYR.search(text):
+        return None
+    k = f"{int(slow)}|{text}"
+    if k in _tts_cache:
+        _tts_cache.move_to_end(k)
+        return _tts_cache[k]
+    key = os.getenv("GOOGLE_API_KEY") or ""
+    if not key or "..." in key:
+        return None
+    for model in TTS_MODELS:
+        try:
+            audio = wav(_tts_request(model, text, slow, key, opener))
+            _tts_cache[k] = audio
+            if len(_tts_cache) > TTS_CACHE_SIZE:
+                _tts_cache.popitem(last=False)
+            return audio
+        except Exception as e:
+            print(f"⚠️ Озвучка {model} не сработала: {e}")
+    return None
+
+
+class SpeakIn(BaseModel):
+    text: str = ""
+    slow: bool = False
+
+
 class Turn(BaseModel):
     role: str = "user"
     text: str = ""
@@ -227,5 +303,15 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         if hist and hist[-1].get("role") == "user" and len(str(hist[-1].get("text", "")).strip()) < 1:
             return {"error": "Напишите что-нибудь."}
         return talk(hist, body.level.strip().upper(), body.topic, ask)
+
+    @router.post("/speak")
+    def speak_endpoint(body: SpeakIn, request: Request):
+        if not rate_ok(client_ip(request), 80, "tts"):
+            return Response(status_code=429)
+        audio = speak(body.text, body.slow)
+        if not audio:
+            return Response(status_code=503)
+        return Response(content=audio, media_type="audio/wav",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
     return router
