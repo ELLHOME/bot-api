@@ -19,6 +19,7 @@ import json
 import os
 import re
 import struct
+import urllib.error
 import urllib.request
 from collections import OrderedDict
 
@@ -299,21 +300,34 @@ def speak(text: str, slow: bool, opener=None) -> bytes | None:
 
 
 # ── Распознавание речи ──────────────────────────────────────────────
-# Запись из браузера уходит модели как есть: Gemini понимает и webm/opus
-# (Chrome, Android), и m4a/aac (Safari, iPhone). Распознавание в самом
+# Запись приходит из браузера как WAV 16 кГц моно — страница сама собирает
+# её из микрофона. Этот формат понимает любая модель, в отличие от webm,
+# который одни версии принимают, а другие нет. Распознавание в самом
 # браузере не годится: в Firefox и Яндекс.Браузере его нет, а в Chrome оно
 # «исправляет» ошибки — человек говорит «she go», а видит «she goes»,
 # и собеседнику нечего поправить.
-HEAR_MODELS = [m for m in (os.getenv("GEMINI_MODEL"), "gemini-2.5-flash") if m]
-HEAR_MAX = 2_000_000             # ~минута речи в opus; больше — это уже не реплика
+#
+# Имя модели по умолчанию то же, что у чата в server.py. Раньше здесь
+# стояло только os.getenv("GEMINI_MODEL"): переменная на сервере не задана,
+# чат жил на своём значении по умолчанию, а распознаванию оставалась одна
+# старая запасная модель — отсюда «распознавание недоступно».
+HEAR_MODELS = list(dict.fromkeys(m for m in (
+    os.getenv("GEMINI_HEAR_MODEL"), os.getenv("GEMINI_MODEL"), "gemini-3.6-flash",
+    "gemini-3-flash", "gemini-2.5-flash") if m))
+HEAR_MAX = 2_000_000             # 30 секунд WAV 16 кГц — около 1 МБ
 HEAR_TYPES = {"audio/webm", "audio/ogg", "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/aac",
               "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/flac"}
 HEAR_PROMPT = (
-    "Transcribe this recording word for word. The speaker is a Russian adult learning "
-    "English. Keep every grammar mistake exactly as spoken — do NOT correct anything, "
-    "the mistakes are what a tutor needs to see. If a phrase is in Russian, write it in "
-    "Russian (Cyrillic). If a word is unclear, write your best guess. If there is no "
-    "speech at all, return an empty line. Return only the transcript, no quotes, no comments."
+    "You transcribe a short recording of a Russian adult learning English.\n"
+    "1. text — the transcript, word for word. Keep every grammar mistake exactly as "
+    "spoken: do NOT correct anything, a tutor needs to see the mistakes. If a phrase is "
+    "in Russian, write it in Russian (Cyrillic). If there is no speech, text is empty.\n"
+    "2. unclear — up to two English words from text that were pronounced so that a "
+    "native speaker would struggle to understand them (wrong stress, a missing or wrong "
+    "sound). Only real problems; for clear speech return an empty list. For each: word "
+    "exactly as in text, and tip — one short hint in Russian about how to say it, "
+    "e.g. «ударение на первый слог: ÍN-te-res-ting» or «th — кончик языка между зубами».\n"
+    'Return only JSON: {"text": "...", "unclear": [{"word": "...", "tip": "..."}]}'
 )
 
 
@@ -323,41 +337,82 @@ def _hear_request(model: str, audio: bytes, mime: str, key: str, opener=None) ->
             {"text": HEAR_PROMPT},
             {"inlineData": {"mimeType": mime, "data": base64.b64encode(audio).decode()}},
         ]}],
-        "generationConfig": {"temperature": 0},
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
     req = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "x-goog-api-key": key})
-    with (opener or urllib.request.urlopen)(req, timeout=40) as r:
-        d = json.loads(r.read())
+    try:
+        with (opener or urllib.request.urlopen)(req, timeout=40) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # Google объясняет отказ в теле ответа — без него в журнале видно
+        # только «HTTP Error 404», и непонятно, модель это или формат.
+        try:
+            msg = json.loads(e.read()).get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        raise RuntimeError(f"HTTP {e.code}: {msg[:200]}") from None
     parts = d["candidates"][0]["content"].get("parts") or []
     return "".join(p.get("text", "") for p in parts)
 
 
-def hear(audio: bytes, mime: str, opener=None) -> tuple[str, str]:
-    """→ (текст, ошибка). Ошибка — короткая фраза для человека."""
+def _parse_heard(raw: str) -> tuple[str, list[dict]]:
+    raw = (raw or "").strip()
+    try:
+        m = re.search(r"\{.*\}", raw, re.S)
+        d = json.loads(m.group(0)) if m else None
+    except Exception:
+        d = None
+    if not isinstance(d, dict):
+        # модель ответила просто текстом — это и есть расшифровка
+        return re.sub(r"\s+", " ", raw).strip().strip('"«»').strip()[:MAX_TEXT], []
+    text = re.sub(r"\s+", " ", str(d.get("text") or "")).strip().strip('"«»').strip()[:MAX_TEXT]
+    unclear, seen = [], set()
+    for u in (d.get("unclear") if isinstance(d.get("unclear"), list) else []):
+        if not isinstance(u, dict):
+            continue
+        w = str(u.get("word") or "").strip()
+        tip = str(u.get("tip") or "").strip()[:160]
+        # слово должно правда быть в расшифровке и быть английским,
+        # а подсказка — по-русски; иначе это выдумка, а не замечание
+        if not w or _CYR.search(w) or not _CYR.search(tip) or not _has_word(text, w):
+            continue
+        if _norm(w) in seen:
+            continue
+        seen.add(_norm(w))
+        unclear.append({"word": w, "tip": tip})
+    return text, unclear[:2]
+
+
+def hear(audio: bytes, mime: str, opener=None) -> dict:
+    """→ {"text", "unclear"} или {"error", "detail"}."""
     mime = (mime or "").split(";")[0].strip().lower()
     if mime not in HEAR_TYPES:
-        return "", "Этот формат записи не поддерживается."
+        return {"error": "Этот формат записи не поддерживается.", "detail": mime}
     if len(audio) < 800:
-        return "", "Запись слишком короткая — нажмите и скажите фразу."
+        return {"error": "Запись слишком короткая — скажите фразу чуть дольше."}
     if len(audio) > HEAR_MAX:
-        return "", "Слишком длинная запись. Скажите короче, одной-двумя фразами."
+        return {"error": "Слишком длинная запись. Скажите короче, одной-двумя фразами."}
     key = os.getenv("GOOGLE_API_KEY") or ""
     if not key or "..." in key:
-        return "", "Распознавание сейчас недоступно."
+        return {"error": "Распознавание сейчас недоступно.", "detail": "нет GOOGLE_API_KEY"}
+    fails = []
     for model in HEAR_MODELS:
         try:
-            t = _hear_request(model, audio, mime, key, opener)
+            raw = _hear_request(model, audio, mime, key, opener)
         except Exception as e:
             print(f"⚠️ Распознавание {model} не сработало: {e}")
+            fails.append(f"{model}: {e}")
             continue
-        t = re.sub(r"\s+", " ", t).strip().strip('"«»').strip()[:MAX_TEXT]
-        if not t:
-            return "", "Не расслышал. Попробуйте ещё раз, чуть ближе к микрофону."
-        return t, ""
-    return "", "Распознавание сейчас недоступно. Попробуйте ещё раз."
+        text, unclear = _parse_heard(raw)
+        if not text:
+            return {"error": "Не расслышал. Скажите ещё раз, чуть ближе к микрофону."}
+        return {"text": text, "unclear": unclear}
+    # причину отдаём мелким шрифтом: по скриншоту сразу видно, в чём дело
+    return {"error": "Распознавание сейчас недоступно. Попробуйте ещё раз.",
+            "detail": " · ".join(fails)[:400]}
 
 
 class SpeakIn(BaseModel):
@@ -393,8 +448,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         if not rate_ok(client_ip(request), 60, "hear"):
             return {"error": "Слишком много записей подряд. Передохните пару минут."}
         audio = await request.body()
-        text, err = hear(audio, request.headers.get("content-type", ""))
-        return {"error": err} if err else {"text": text}
+        return hear(audio, request.headers.get("content-type", ""))
 
     @router.post("/speak")
     def speak_endpoint(body: SpeakIn, request: Request):
