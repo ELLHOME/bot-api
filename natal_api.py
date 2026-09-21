@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 8
+READING_V = 9
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -72,7 +72,27 @@ def _ensure_tables(cur) -> None:
     cur.execute("CREATE TABLE IF NOT EXISTS transit_readings ("
                 "key TEXT PRIMARY KEY, payload JSONB NOT NULL, "
                 "created_at TIMESTAMP DEFAULT NOW())")
+    # Строки со старыми открытыми ключами — в них дата рождения прямо в ключе,
+    # а в самих разборах ещё и место с датой. Это кэш: удалить не страшно,
+    # разбор пересчитается при следующем заходе.
+    cur.execute(r"DELETE FROM natal_readings WHERE key ~ '\d{4}-\d{2}-\d{2}'")
+    cur.execute(r"DELETE FROM transit_readings WHERE key ~ '\d{4}-\d{2}-\d{2}'")
     _db_ready = True
+
+
+# Ключ кэша раньше был открытым текстом: «дата|время|широта|долгота|пояс».
+# То есть таблица хранила дату, минуту и место рождения каждого, кто посчитал
+# карту. Теперь в базу идёт HMAC этих данных. Простой хэш не годится:
+# вариантов «день × минута × город» всего миллиарды, их перебирают за часы.
+# С секретным ключом перебор без этого ключа бессмысленен.
+import hashlib as _hashlib
+import hmac as _hmac
+
+_CACHE_SECRET = (os.getenv("NATAL_CACHE_SECRET") or DATABASE_URL or "").encode()
+
+
+def _private_key(prefix: str, raw: str) -> str:
+    return prefix + "|" + _hmac.new(_CACHE_SECRET, raw.encode(), _hashlib.sha256).hexdigest()[:40]
 
 
 def _cache_get(table: str, col: str, key: str):
@@ -1181,8 +1201,9 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             return {"error": "Координаты вне Земли."}
 
         school = body.school if body.school in SCHOOLS else "classic"
-        key = (f"v{READING_V}|{school}|{body.date}|{body.time}|{round(body.lat, 3)}"
+        raw_key = (f"v{READING_V}|{school}|{body.date}|{body.time}|{round(body.lat, 3)}"
                f"|{round(body.lon, 3)}|{tz}|{int(bool(body.unknown_time))}")
+        key = _private_key(f"v{READING_V}", raw_key)
         # Предупреждение про перевод стрелок считается заново на каждый ответ:
         # оно выводится из тех же данных и стоит доли миллисекунды, зато старые
         # строки в кэше не надо пересчитывать ради нового поля.
@@ -1207,7 +1228,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             tr = None
         tr = _trust_hits(tr, not body.unknown_time)
 
-        now_key = f"t{TRANSIT_V}|{key}|{tr['when']}" if tr else ""
+        now_key = _private_key(f"t{TRANSIT_V}", f"{raw_key}|{tr['when']}") if tr else ""
         now_cached = _cache_get("transit_readings", "key", now_key) if tr else None
 
         if cached is not None:
@@ -1247,8 +1268,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         }
         # В кэш карты кладём только то, что не зависит от сегодняшнего дня.
         if cached is None:
-            _cache_put("natal_readings", "key", key,
-                       {k: v for k, v in payload.items() if k not in ("now", "tz_note")})
+            _cache_put("natal_readings", "key", key, {"reading": reading})
         return payload
 
     @router.post("/ask")
