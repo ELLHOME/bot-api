@@ -79,6 +79,12 @@ SYSTEM_TUTOR = (
     "Не больше трёх. en — как в тексте, ru — короткий перевод.\n"
     "3. level — оценка уровня человека по всем его репликам: A1, A2, B1, B2 или "
     "C1. Если реплик пока мало, оставь пустым.\n"
+    "4. suggest — три готовых ответа на твой вопрос, которые человек может "
+    "взять целиком или поправить под себя. По-английски, на его уровне, "
+    "короткие, разные по смыслу: например, «да», «нет» и «ну, так себе». "
+    "Пиши от первого лица, как ответил бы сам человек, а не ты. Вставляй "
+    "понятные заготовки вместо личного: «My name is ...», «I live in ...». "
+    "Это подсказка для тех, кто не знает, с чего начать, — поэтому просто.\n"
     "\n"
     "Если человек пишет о беде — насилии, мыслях о смерти, отчаянии — оставь "
     "английский. Ответь по-русски, коротко и по-человечески, и посоветуй "
@@ -88,7 +94,8 @@ SYSTEM_TUTOR = (
     '{"reply": "твой ответ по-английски", "hint_ru": "русская подсказка или пустая строка", '
     '"corrections": [{"wrong": "...", "right": "...", "why": "..."}], '
     '"say": {"ru": "что человек написал по-русски", "en": "как это сказать"} или null, '
-    '"words": [{"en": "...", "ru": "..."}], "level": ""}'
+    '"words": [{"en": "...", "ru": "..."}], "level": "", '
+    '"suggest": ["ответ 1", "ответ 2", "ответ 3"]}'
 )
 
 _CYR = re.compile(r"[а-яё]", re.I)
@@ -110,7 +117,7 @@ def clean(out: dict, last_user: str, user_turns: int) -> dict:
     hint = str(out.get("hint_ru") or "").strip()[:500]
 
     corr = []
-    for c in out.get("corrections") or []:
+    for c in (out.get("corrections") if isinstance(out.get("corrections"), list) else []):
         if not isinstance(c, dict):
             continue
         wrong = str(c.get("wrong") or "").strip()
@@ -135,7 +142,7 @@ def clean(out: dict, last_user: str, user_turns: int) -> dict:
         say = {"ru": str(say.get("ru") or "").strip()[:300], "en": str(say["en"]).strip()[:300]}
 
     words, seen = [], set()
-    for w in out.get("words") or []:
+    for w in (out.get("words") if isinstance(out.get("words"), list) else []):
         if not isinstance(w, dict):
             continue
         en = str(w.get("en") or "").strip()
@@ -152,16 +159,31 @@ def clean(out: dict, last_user: str, user_turns: int) -> dict:
         words.append({"en": en, "ru": ru[:80]})
     words = words[:3]
 
+    # Готовые ответы. Проверяем, что это английский, что они короткие и
+    # не повторяют реплику самого собеседника — модель иногда путает, чей ход.
+    suggest, sseen = [], set()
+    raw_sug = out.get("suggest")
+    for x in (raw_sug if isinstance(raw_sug, list) else []):
+        t = re.sub(r"\s+", " ", str(x or "")).strip().strip('"«»')
+        if not t or len(t) > 90 or _CYR.search(t) or _norm(t) == _norm(reply):
+            continue
+        if not re.search(r"[a-z]", t, re.I) or _norm(t) in sseen:
+            continue
+        sseen.add(_norm(t))
+        suggest.append(t)
+    suggest = suggest[:3]
+
     lvl = str(out.get("level") or "").strip().upper()
     level = lvl if lvl in LEVELS and user_turns >= LEVEL_AFTER else ""
 
     return {"reply": reply, "hint_ru": hint, "corrections": corr,
-            "say": say, "words": words, "level": level}
+            "say": say, "words": words, "level": level, "suggest": suggest}
 
 
 def _fallback() -> dict:
     return {"reply": "", "hint_ru": "", "corrections": [], "say": None,
-            "words": [], "level": "", "error": "Собеседник сейчас не отвечает. Попробуйте ещё раз."}
+            "words": [], "level": "", "suggest": [],
+            "error": "Собеседник сейчас не отвечает. Попробуйте ещё раз."}
 
 
 def talk(history: list[dict], level: str, topic: str, ask) -> dict:
