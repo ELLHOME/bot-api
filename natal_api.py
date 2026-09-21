@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 6
+READING_V = 7
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -323,6 +323,47 @@ THEMES = [
 ]
 
 
+# Сколько планета стоит в одном знаке. Это и есть число людей, с которыми
+# вы делите «Юпитер в Деве»: всех, кто родился за этот срок. Дома и углы
+# карты, наоборот, меняются за минуты — они и делают разбор вашим.
+SHARED = {"Луна": "2–3 дня", "Солнце": "месяц", "Меркурий": "3–8 недель",
+          "Венера": "1–2 месяца", "Марс": "1,5–2 месяца", "Юпитер": "год",
+          "Сатурн": "2,5 года", "Хирон": "несколько лет", "Уран": "7 лет",
+          "Нептун": "14 лет", "Плутон": "12–30 лет", "Сев. узел": "1,5 года",
+          "Прозерпина": "десятилетия", "Селена": "7 лет"}
+MINE = "[ЛИЧНОЕ: зависит от часа и минуты рождения]"
+
+
+def _shared(name: str) -> str:
+    return f"[ОБЩЕЕ: планета стоит в этом знаке ≈ {SHARED[name]}]" if name in SHARED else ""
+
+
+def _asp_tag(a: dict) -> str:
+    x, y = a["a"], a["b"]
+    if "ASC" in (x, y) or "MC" in (x, y):
+        return MINE
+    if "Луна" in (x, y):
+        return "[ПОЧТИ ЛИЧНОЕ: держится часы]"
+    if x in SLOW and y in SLOW:
+        return "[ПОКОЛЕНИЕ: не черта человека]"
+    return "[ОБЩЕЕ: держится дни или недели]"
+
+
+def _asp(a: dict) -> str:
+    return f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])}) {_asp_tag(a)}"
+
+
+def signature(ch: dict, time_known: bool = True) -> list[str]:
+    """Самое редкое в карте: точные аспекты к углам. Держатся минуты — у
+    соседа по роддому их уже нет. Модель должна видеть их первыми, а не
+    искать в хвосте списков."""
+    if not time_known:
+        return []
+    near = sorted((a for a in (ch.get("angle_aspects") or []) if a["exact"] < 2.0),
+                  key=lambda a: a["exact"])
+    return [_asp(a) for a in near[:4]]
+
+
 def _cusp_sign(ch: dict, n: int) -> str:
     return ch["houses"][n - 1]["label"].split()[0]
 
@@ -332,14 +373,14 @@ def _house_line(ch: dict, n: int) -> list[str]:
     by = {p["name"]: p for p in ch["planets"]}
     sign = _cusp_sign(ch, n)
     modern, classic = engine.RULER[sign]
-    out = [f"{n}-й дом начинается в знаке {sign}"]
+    out = [f"{n}-й дом начинается в знаке {sign} {MINE}"]
     for who in filter(None, (modern, classic)):
         p = by.get(who)
         if p:
             tag = "управитель" if who == modern else "управитель по старой традиции"
-            out.append(f"{tag} {n}-го дома {who} стоит {p['label']}, в {p['house']}-м доме")
+            out.append(f"{tag} {n}-го дома {who} стоит {p['label']}, в {p['house']}-м доме {MINE}")
     inside = [p["name"] for p in ch["planets"] if p["house"] == n and not p.get("fictional")]
-    out.append(f"в {n}-м доме: " + (", ".join(inside) if inside else "планет нет"))
+    out.append(f"в {n}-м доме: " + (", ".join(inside) if inside else "планет нет") + f" {MINE}")
     return out
 
 
@@ -351,7 +392,7 @@ def _aspects_of(ch: dict, names, limit: int = 5, skip_gen: bool = True) -> list[
             continue
         if skip_gen and a["a"] in SLOW and a["b"] in SLOW:
             continue
-        out.append(f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})")
+        out.append(_asp(a))
         if len(out) >= limit:
             break
     return out
@@ -361,7 +402,8 @@ def _pos(ch: dict, name: str, houses: bool = True) -> str:
     p = next((x for x in ch["planets"] if x["name"] == name), None)
     if not p:
         return ""
-    return (f"{name}: {p['label']}" + (f", {p['house']}-й дом" if houses else "")
+    return (f"{name} в знаке {p['label']} {_shared(name)}"
+            + (f"; {p['house']}-й дом {MINE}" if houses else "")
             + (", ретроградна" if p["retro"] else ""))
 
 
@@ -377,7 +419,9 @@ def themes(ch: dict, time_known: bool = True) -> dict:
 
     t["character"] = [
         _pos_(ch, "Солнце"),
-        *( [f"асцендент {ch['asc']['label']}", d["ruler"]] if time_known else [] ),
+        *( [f"асцендент {ch['asc']['label']} {MINE}", f"{d['ruler']} {MINE}",
+             *[_asp(a) for a in (ch.get("angle_aspects") or []) if a["b"] == "ASC"][:3]]
+           if time_known else [] ),
         _pos_(ch, "Луна"),
         "стихии (сколько тел): " + ", ".join(f"{k} {v}" for k, v in el.items()),
         "кресты: " + ", ".join(f"{k} {v}" for k, v in md.items()),
@@ -398,10 +442,12 @@ def themes(ch: dict, time_known: bool = True) -> dict:
     ]
     work = [_pos_(ch, "Солнце"), _pos_(ch, "Сатурн"), _pos_(ch, "Юпитер"), _pos_(ch, "Марс")]
     if time_known:
-        work = [f"середина неба (MC) {ch['mc']['label']}", *_house_line(ch, 10),
+        work = [f"середина неба (MC) {ch['mc']['label']} {MINE}", *_house_line(ch, 10),
                 *_house_line(ch, 6), *_house_line(ch, 2), *work]
-        work += [f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})"
-                 for a in (ch.get("angle_aspects") or []) if a["b"] == "MC"][:3]
+        # Аспекты к MC — самое личное, что есть в теме работы: держатся минуты.
+        # Ставим их сразу за самой серединой неба, а не в хвост списка.
+        to_mc = [_asp(a) for a in (ch.get("angle_aspects") or []) if a["b"] == "MC"][:3]
+        work = work[:1] + to_mc + work[1:]
     t["work"] = work
     love = [_pos_(ch, "Венера"), _pos_(ch, "Марс"), *_aspects_of(ch, ["Венера", "Марс"], 5)]
     if time_known:
@@ -415,7 +461,7 @@ def themes(ch: dict, time_known: bool = True) -> dict:
     hard = [a for a in ch["aspects"] if a["type"] in ("квадрат", "оппозиция") and personal(a)][:4]
     conj = [a for a in ch["aspects"] if a["type"] == "соединение"
             and (a["a"] in PERSONAL or a["b"] in PERSONAL)][:3]
-    fmt = lambda a: f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})"
+    fmt = _asp
     t["growth"] = (["гармоничные аспекты: " + "; ".join(map(fmt, soft))] if soft else []) + \
                   (["напряжённые аспекты: " + "; ".join(map(fmt, hard))] if hard else []) + \
                   (["соединения с личными планетами: " + "; ".join(map(fmt, conj))] if conj else []) + \
@@ -468,6 +514,24 @@ SYSTEM_NOW = (
     "а не к жизни, и совпадения человек проверяет сам."
 )
 
+
+PERSONAL_FIRST = (
+    "ЛИЧНОЕ ПРЕЖДЕ ОБЩЕГО. Это главное правило, из-за него разбор или про "
+    "человека, или про всех подряд. Каждый факт помечен:\n"
+    "[ЛИЧНОЕ] — асцендент, середина неба, дома, аспекты к углам. Меняются за "
+    "минуты, у соседа по роддому уже другие. На них и строй вывод.\n"
+    "[ПОЧТИ ЛИЧНОЕ] — аспекты Луны, держатся часы.\n"
+    "[ОБЩЕЕ: ≈ срок] — знак планеты. «Юпитер в Деве» у всех, кто родился в тот "
+    "же год, «Солнце в Раке» — у всех за месяц. Если вывод держится только на "
+    "знаке, он описывает не человека, а его ровесников. Знак годится как краска "
+    "к личному факту — «Марс, управитель вашего десятого дома, стоит в третьем» — "
+    "но не как основание.\n"
+    "[ПОКОЛЕНИЕ] — вообще не черта человека.\n"
+    "Если среди фактов есть очень точный аспект к углу карты (меньше градуса) — "
+    "это самое редкое, что есть в карте: он держится считанные минуты. Не пропусти его.\n"
+    "Метки в квадратных скобках в текст не переноси.\n"
+)
+
 SYSTEM_PROFILE = (
     "Ты пишешь личный разбор натальной карты для страницы «Эфемерида». Человек "
     "пришёл узнать про себя: какой у него характер, что ему подходит в работе, "
@@ -499,6 +563,7 @@ SYSTEM_PROFILE = (
     "— Два абзаца, всего 90–150 слов. Опирайся на два-три самых весомых фактора "
     "темы, а не перечисляй все.\n"
     "\n"
+    + PERSONAL_FIRST + "\n"
     "ПРАВИЛА, нарушать которые нельзя:\n"
     "1. Все знаки, дома, градусы и аспекты — ТОЛЬКО из выданных фактов. "
     "Ничего не пересчитывай и не добавляй.\n"
@@ -529,12 +594,14 @@ PROFILE_PARTS = [
     {
         "ids": ("work", "love", "growth"),
         "extra": (
-            "Для раздела work верни ещё \"fields\" — от пяти до семи конкретных "
+            "Для раздела work верни ещё \"fields\" — от трёх до пяти конкретных "
             "сфер и профессий, которые традиция связывает с этой картой. Каждая — "
             "одно-три слова: «инженер-конструктор», «юриспруденция», «ресторанное "
             "дело». Не «творчество» и не «работа с людьми» — это ни о чём. "
-            "Сферы должны следовать из фактов раздела work, а в тексте раздела "
-            "объясни, из чего выбраны две-три главные."
+            "Сферы должны следовать из ЛИЧНЫХ фактов раздела work — середины неба, "
+            "аспектов к ней, управителя десятого дома — а в тексте раздела объясни, "
+            "из чего выбраны две главные. Длинный список, где есть всё от юриста до "
+            "фармацевта, — это ответ ни о ком."
         ),
         "shape": '{"sections": {"work": "текст", "love": "текст", "growth": "текст"}, '
                  '"fields": ["сфера", "сфера", "сфера", "сфера", "сфера"]}',
@@ -581,8 +648,11 @@ def _fallback_reading(d: dict) -> dict:
     }
 
 
-def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask) -> dict:
+def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
+                  sig: list | None = None) -> dict:
     facts = {TOPIC_HINT[i]: t[i] for i in part["ids"]}
+    if sig:
+        facts = {"самое редкое в карте — точные углы к асценденту и MC": sig, **facts}
     prompt = ("Факты карты, уже разложенные по темам:\n" +
               json.dumps(facts, ensure_ascii=False, indent=1) + unknown_note + fict_warn +
               "\n\nНапиши по разделу на каждую тему. " + part["extra"] +
@@ -615,7 +685,9 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
 
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(PROFILE_PARTS)) as pool:
-        outs = list(pool.map(lambda p: _profile_part(p, t, fict, unknown, ask), PROFILE_PARTS))
+        sig = signature(ch, time_known)
+        outs = list(pool.map(lambda p: _profile_part(p, t, fict, unknown, ask, sig),
+                             PROFILE_PARTS))
 
     titles = dict(THEMES)
     sections, summary = [], ""
@@ -782,14 +854,21 @@ SYSTEM_ASK = (
     "Ты отвечаешь на вопрос человека на странице «Эфемерида». У тебя есть его "
     "карта рождения, разложенная по темам, и сегодняшнее небо над ней.\n"
     "\n" + VOICE + "\n"
+    + PERSONAL_FIRST + "\n"
     "ГЛАВНОЕ. Человек спросил — ответь. Первая же фраза — прямой ответ по карте, "
     "выделенный **жирным**. Не встречный вопрос, не рассуждение о том, что карта "
     "ничего не знает, — ответ, как его дал бы толковый астролог.\n"
     "\n"
     "КАК ОТВЕЧАТЬ НА РАЗНОЕ:\n"
     "— Про характер, таланты, работу, профессию, отношения, деньги как привычку — "
-    "отвечай по существу и конкретно. Спросили, какая профессия подходит, — назови "
-    "три-пять конкретных и объясни, из каких положений карты они следуют.\n"
+    "отвечай по существу и конкретно. Спросили, какая профессия подходит, — дай "
+    "одно главное направление и не больше трёх профессий, и покажи, чем ваш "
+    "вариант отличается от соседнего: не «юрист», а «юрист в договорной работе, "
+    "не в суде» — и почему. Десять профессий подряд — это ответ ни о ком.\n"
+    "— Если человек рассказал о себе — чем занят, что выбирает, сколько лет "
+    "в деле, — отвечай про его случай, а не вообще. Сопоставь его слова с картой.\n"
+    "— Возраст человека тебе выдан. Учитывай его: в двадцать и в сорок пять "
+    "«подходящая работа» значит разное.\n"
     "— Про «что меня ждёт», «когда», «какой будет осень» — опирайся на выданные "
     "транзиты и их даты. Говори о периоде и его теме: «до 14 октября Сатурн давит "
     "на ваше Солнце — время, когда всё идёт с усилием». Конкретных событий не "
@@ -817,25 +896,48 @@ SYSTEM_ASK = (
     "фразы. Никакого JSON, обычный текст, абзацы через пустую строку."
 )
 
+def _age(ch: dict) -> int | None:
+    try:
+        born = dt.datetime.fromisoformat(ch["utc"]).date()
+    except Exception:
+        return None
+    today = dt.date.today()
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
 def answer_question(ch: dict, tr: dict | None, question: str, ask,
-                    time_known: bool = True) -> str:
+                    time_known: bool = True, history: list | None = None) -> str:
     t = themes(ch, time_known)
+    sig = signature(ch, time_known)
     facts = {
+        **({"самое редкое в карте — точные углы к асценденту и MC": sig} if sig else {}),
         "карта рождения по темам": {TOPIC_HINT[k]: v for k, v in t.items()},
         "самые точные аспекты": [
-            f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])})"
-            for a in ch["aspects"][:6]],
+            _asp(a) for a in ch["aspects"][:6]],
     }
     if time_known:
         facts["углы карты"] = {"асцендент": ch["asc"]["label"], "середина неба": ch["mc"]["label"]}
+    age = _age(ch)
+    if age is not None:
+        facts["возраст"] = f"{age} лет"
     if tr:
         facts["сегодня"] = now_facts(tr)
+    # Прошлые вопросы — чтобы «а если я уже десять лет инженер?» понималось
+    # как продолжение, а не как новый разговор с чистого листа.
+    talk = ""
+    for h in (history or [])[-3:]:
+        q0 = str(h.get("q", ""))[:400].strip() if isinstance(h, dict) else ""
+        a0 = str(h.get("a", ""))[:1200].strip() if isinstance(h, dict) else ""
+        if q0 and a0:
+            talk += f"\nВопрос: {q0}\nТвой ответ: {a0}\n"
+    if talk:
+        talk = "\n\nРАНЬШЕ В ЭТОМ РАЗГОВОРЕ:" + talk
     note = ("" if time_known else
             "\n\nВремя рождения неизвестно: домов, асцендента и середины неба нет, "
             "не упоминай их.")
     warn = FICT_WARNING if any(p.get("fictional") for p in ch["planets"]) else ""
     prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) + note + warn +
-              "\n\nВопрос человека: " + question.strip() +
+              talk + "\n\nВопрос человека: " + question.strip() +
               "\n\nОтветь по правилам.")
     try:
         out = (ask(prompt, system=SYSTEM_ASK, temperature=0.8) or "").strip()
@@ -889,6 +991,7 @@ def _parse_when(body: ChartIn) -> tuple[dt.datetime, str] | tuple[None, str]:
 
 class AskIn(ChartIn):
     question: str = ""
+    history: list = []      # [{q, a}] — последние вопросы этого же человека
 
 
 def build_router(ask, rate_ok, client_ip) -> APIRouter:
@@ -1024,7 +1127,8 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             tr = None
         tr = _trust_hits(tr, not body.unknown_time)
 
-        text = answer_question(ch, tr, q, ask, not body.unknown_time)
+        text = answer_question(ch, tr, q, ask, not body.unknown_time,
+                               body.history if isinstance(body.history, list) else [])
         if not text:
             return {"error": "Ответ не сложился. Попробуйте ещё раз."}
         return {"question": q, "answer": text}
