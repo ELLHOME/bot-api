@@ -272,7 +272,7 @@ EVENT_NAMES = {
     "chat_open", "chat_tab", "chat_message", "chat_copy",
     "contact_click", "project_view",
     "natal_chart", "natal_ask",       # natal_ask страница слала давно, а счётчик молча выкидывал
-    "english_start", "english_msg", "english_pairs",
+    "english_start", "english_msg", "english_pairs", "english_voice",
 }
 _events_ready = False
 

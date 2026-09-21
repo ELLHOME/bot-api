@@ -298,6 +298,68 @@ def speak(text: str, slow: bool, opener=None) -> bytes | None:
     return None
 
 
+# ── Распознавание речи ──────────────────────────────────────────────
+# Запись из браузера уходит модели как есть: Gemini понимает и webm/opus
+# (Chrome, Android), и m4a/aac (Safari, iPhone). Распознавание в самом
+# браузере не годится: в Firefox и Яндекс.Браузере его нет, а в Chrome оно
+# «исправляет» ошибки — человек говорит «she go», а видит «she goes»,
+# и собеседнику нечего поправить.
+HEAR_MODELS = [m for m in (os.getenv("GEMINI_MODEL"), "gemini-2.5-flash") if m]
+HEAR_MAX = 2_000_000             # ~минута речи в opus; больше — это уже не реплика
+HEAR_TYPES = {"audio/webm", "audio/ogg", "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/aac",
+              "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/flac"}
+HEAR_PROMPT = (
+    "Transcribe this recording word for word. The speaker is a Russian adult learning "
+    "English. Keep every grammar mistake exactly as spoken — do NOT correct anything, "
+    "the mistakes are what a tutor needs to see. If a phrase is in Russian, write it in "
+    "Russian (Cyrillic). If a word is unclear, write your best guess. If there is no "
+    "speech at all, return an empty line. Return only the transcript, no quotes, no comments."
+)
+
+
+def _hear_request(model: str, audio: bytes, mime: str, key: str, opener=None) -> str:
+    body = {
+        "contents": [{"parts": [
+            {"text": HEAR_PROMPT},
+            {"inlineData": {"mimeType": mime, "data": base64.b64encode(audio).decode()}},
+        ]}],
+        "generationConfig": {"temperature": 0},
+    }
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    with (opener or urllib.request.urlopen)(req, timeout=40) as r:
+        d = json.loads(r.read())
+    parts = d["candidates"][0]["content"].get("parts") or []
+    return "".join(p.get("text", "") for p in parts)
+
+
+def hear(audio: bytes, mime: str, opener=None) -> tuple[str, str]:
+    """→ (текст, ошибка). Ошибка — короткая фраза для человека."""
+    mime = (mime or "").split(";")[0].strip().lower()
+    if mime not in HEAR_TYPES:
+        return "", "Этот формат записи не поддерживается."
+    if len(audio) < 800:
+        return "", "Запись слишком короткая — нажмите и скажите фразу."
+    if len(audio) > HEAR_MAX:
+        return "", "Слишком длинная запись. Скажите короче, одной-двумя фразами."
+    key = os.getenv("GOOGLE_API_KEY") or ""
+    if not key or "..." in key:
+        return "", "Распознавание сейчас недоступно."
+    for model in HEAR_MODELS:
+        try:
+            t = _hear_request(model, audio, mime, key, opener)
+        except Exception as e:
+            print(f"⚠️ Распознавание {model} не сработало: {e}")
+            continue
+        t = re.sub(r"\s+", " ", t).strip().strip('"«»').strip()[:MAX_TEXT]
+        if not t:
+            return "", "Не расслышал. Попробуйте ещё раз, чуть ближе к микрофону."
+        return t, ""
+    return "", "Распознавание сейчас недоступно. Попробуйте ещё раз."
+
+
 class SpeakIn(BaseModel):
     text: str = ""
     slow: bool = False
@@ -325,6 +387,14 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
         if hist and hist[-1].get("role") == "user" and len(str(hist[-1].get("text", "")).strip()) < 1:
             return {"error": "Напишите что-нибудь."}
         return talk(hist, body.level.strip().upper(), body.topic, ask)
+
+    @router.post("/hear")
+    async def hear_endpoint(request: Request):
+        if not rate_ok(client_ip(request), 60, "hear"):
+            return {"error": "Слишком много записей подряд. Передохните пару минут."}
+        audio = await request.body()
+        text, err = hear(audio, request.headers.get("content-type", ""))
+        return {"error": err} if err else {"text": text}
 
     @router.post("/speak")
     def speak_endpoint(body: SpeakIn, request: Request):
