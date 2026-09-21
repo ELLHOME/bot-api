@@ -21,7 +21,22 @@ FLAGS = swe.FLG_SWIEPH | swe.FLG_MOSEPH | swe.FLG_SPEED
 # формуле. Его положения берут из заранее посчитанной таблицы — это файл
 # seas_18.se1 рядом с кодом. Файла нет — Хирон просто не считается,
 # остальная карта работает как работала.
-swe.set_ephe_path(os.path.dirname(os.path.abspath(__file__)))
+EPHE_DIR = os.path.dirname(os.path.abspath(__file__))
+swe.set_ephe_path(EPHE_DIR)
+
+# Путь к файлам эфемерид Swiss Ephemeris держит в памяти потока, а не
+# процесса. FastAPI выполняет запросы в своих потоках, и там путь снова
+# «.» — файл Хирона находился только потому, что сервер запущен из папки
+# репозитория. Запустить из другой — и карта падает. Ставим путь в каждом
+# потоке один раз.
+import threading as _threading
+_tls = _threading.local()
+
+
+def _ephe() -> None:
+    if not getattr(_tls, "ok", False):
+        swe.set_ephe_path(EPHE_DIR)
+        _tls.ok = True
 
 
 def _chiron_works() -> bool:
@@ -117,6 +132,7 @@ def chart(when_local: dt.datetime, tz: str, lat: float, lon: float,
     назад: 0 — первый (летнее время), 1 — второй (зимнее). В обычные сутки
     он ни на что не влияет.
     """
+    _ephe()
     aware = when_local.replace(tzinfo=ZoneInfo(tz), fold=fold)
     utc = aware.astimezone(dt.timezone.utc)
     jd = swe.julday(utc.year, utc.month, utc.day,
@@ -319,6 +335,7 @@ def transits(natal_chart: dict, when_utc: dt.datetime | None = None,
     в четыре месяца вокруг сегодня и берём минимум расхождения. Так же
     становится видно, сходится аспект или уже расходится.
     """
+    _ephe()
     now = when_utc or dt.datetime.now(dt.timezone.utc)
     jd = _jd(now)
 
