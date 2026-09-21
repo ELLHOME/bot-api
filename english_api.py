@@ -431,6 +431,205 @@ class TalkIn(BaseModel):
     topic: str = "free"
 
 
+# ── Синхронизация слов между устройствами ────────────────────────────
+# Без регистрации. Браузер при первом заходе сам заводит профиль: случайный
+# номер и свой секретный ключ. В базе лежат только хэши ключей — по дампу
+# базы профилем не воспользоваться. Чтобы подключить второе устройство,
+# первое берёт короткий код (живёт 15 минут, срабатывает один раз); второе
+# вводит его и получает свой собственный ключ к тому же профилю. Ключ
+# никогда не пересылается между устройствами и не хранится на сервере.
+#
+# Храним только слова, уровень и ступени повторения — ни переписки, ни
+# имени, ни почты. Разговоры остаются в браузере.
+import hashlib
+import secrets
+import time
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+SYNC_MAX_WORDS = 5000
+MAX_DEVICES = 10
+LINK_TTL = 15 * 60
+LINK_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"     # без 0/O и 1/I/L — чтобы не путать
+_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_SECRET_RE = re.compile(r"^[a-f0-9]{64}$")
+_sync_ready = False
+OFFLINE = {"error": "Синхронизация сейчас недоступна.", "offline": True}
+
+
+def _db():
+    if not DATABASE_URL:
+        return None
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+
+
+def _sync_tables(cur) -> None:
+    global _sync_ready
+    if _sync_ready:
+        return
+    cur.execute("CREATE TABLE IF NOT EXISTS english_profiles ("
+                "id TEXT PRIMARY KEY, keys TEXT[] NOT NULL, data JSONB NOT NULL, "
+                "created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())")
+    cur.execute("CREATE TABLE IF NOT EXISTS english_links ("
+                "code TEXT PRIMARY KEY, profile_id TEXT NOT NULL, expires DOUBLE PRECISION NOT NULL)")
+    _sync_ready = True
+
+
+def _hash(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _auth(body: dict) -> tuple[str, str] | None:
+    pid, sec = str(body.get("id") or ""), str(body.get("secret") or "")
+    return (pid, sec) if _ID_RE.match(pid) and _SECRET_RE.match(sec) else None
+
+
+def _clean_words(words) -> list[dict]:
+    out = []
+    for w in (words if isinstance(words, list) else [])[:SYNC_MAX_WORDS * 2]:
+        if not isinstance(w, dict):
+            continue
+        en = str(w.get("en") or "").strip()[:60]
+        ru = str(w.get("ru") or "").strip()[:120]
+        if not en:
+            continue
+
+        def num(k, lo=0, hi=10 ** 14):
+            try:
+                return max(lo, min(hi, int(float(w.get(k) or 0))))
+            except (TypeError, ValueError):
+                return 0
+        out.append({"en": en, "ru": ru, "at": num("at"), "box": num("box", 0, 10),
+                    "due": num("due"), "t": num("t") or num("at"), "del": bool(w.get("del"))})
+    return out
+
+
+def merge_words(a: list[dict], b: list[dict]) -> list[dict]:
+    """Слово с одним и тем же en берём из той копии, где его меняли позже.
+    Удалённые слова остаются отметками del — иначе второе устройство
+    вернуло бы удалённое слово при следующей синхронизации."""
+    best: dict[str, dict] = {}
+    for w in [*a, *b]:
+        k = w["en"].lower()
+        cur = best.get(k)
+        if cur is None or w["t"] > cur["t"] or (w["t"] == cur["t"] and w["del"] and not cur["del"]):
+            best[k] = w
+    words = sorted(best.values(), key=lambda w: -w["at"])
+    live = [w for w in words if not w["del"]][:SYNC_MAX_WORDS]
+    dead = [w for w in words if w["del"]][:SYNC_MAX_WORDS]
+    return live + dead
+
+
+def _pick(old: dict, new: dict, key: str, allowed: set) -> tuple[str, int]:
+    """Уровень и самооценка — тоже «кто позже поменял»."""
+    to, tn = int(old.get(key + "_t") or 0), int(new.get(key + "_t") or 0)
+    v = str((new if tn >= to else old).get(key) or "")
+    return (v if v in allowed else ""), max(to, tn)
+
+
+def sync(body: dict, db=None) -> dict:
+    auth = _auth(body)
+    if not auth:
+        return {"error": "bad profile"}
+    pid, sec = auth
+    conn = (db or _db)()
+    if conn is None:
+        return OFFLINE
+    incoming = {"words": _clean_words(body.get("words")),
+                "level": str(body.get("level") or ""), "level_t": int(body.get("level_t") or 0),
+                "self": str(body.get("self") or ""), "self_t": int(body.get("self_t") or 0)}
+    try:
+        from psycopg2.extras import Json
+        with conn, conn.cursor() as cur:
+            _sync_tables(cur)
+            cur.execute("SELECT keys, data FROM english_profiles WHERE id = %s FOR UPDATE", (pid,))
+            row = cur.fetchone()
+            if row and _hash(sec) not in (row[0] or []):
+                return {"error": "forbidden"}
+            old = row[1] if row else {}
+            level, level_t = _pick(old, incoming, "level", {"", *LEVELS})
+            self_, self_t = _pick(old, incoming, "self", {"", "zero", "school", "ok"})
+            merged = {"words": merge_words(_clean_words(old.get("words")), incoming["words"]),
+                      "level": level, "level_t": level_t, "self": self_, "self_t": self_t}
+            if row:
+                cur.execute("UPDATE english_profiles SET data = %s, updated_at = NOW() WHERE id = %s",
+                            (Json(merged), pid))
+            else:
+                cur.execute("INSERT INTO english_profiles (id, keys, data) VALUES (%s, %s, %s)",
+                            (pid, [_hash(sec)], Json(merged)))
+        return {"ok": True, **merged}
+    except Exception as e:
+        print(f"⚠️ Синхронизация не удалась: {e}")
+        return OFFLINE
+    finally:
+        conn.close()
+
+
+def link_new(body: dict, db=None) -> dict:
+    auth = _auth(body)
+    if not auth:
+        return {"error": "bad profile"}
+    pid, sec = auth
+    conn = (db or _db)()
+    if conn is None:
+        return OFFLINE
+    try:
+        with conn, conn.cursor() as cur:
+            _sync_tables(cur)
+            cur.execute("SELECT keys FROM english_profiles WHERE id = %s", (pid,))
+            row = cur.fetchone()
+            if not row or _hash(sec) not in (row[0] or []):
+                return {"error": "Профиль ещё не сохранён — подождите пару секунд и попробуйте снова."}
+            now = time.time()
+            # старые и прошлые коды этого профиля убираем — действует только последний
+            cur.execute("DELETE FROM english_links WHERE expires < %s OR profile_id = %s", (now, pid))
+            code = "".join(secrets.choice(LINK_ALPHABET) for _ in range(6))
+            cur.execute("INSERT INTO english_links (code, profile_id, expires) VALUES (%s, %s, %s)",
+                        (code, pid, now + LINK_TTL))
+        return {"code": code, "ttl": LINK_TTL}
+    except Exception as e:
+        print(f"⚠️ Код не создан: {e}")
+        return OFFLINE
+    finally:
+        conn.close()
+
+
+def link_use(body: dict, db=None) -> dict:
+    code = re.sub(r"[^A-Z0-9]", "", str(body.get("code") or "").upper())
+    if len(code) != 6:
+        return {"error": "В коде шесть знаков."}
+    conn = (db or _db)()
+    if conn is None:
+        return OFFLINE
+    try:
+        with conn, conn.cursor() as cur:
+            _sync_tables(cur)
+            # код срабатывает один раз: удаляем его в той же операции, где читаем
+            cur.execute("DELETE FROM english_links WHERE code = %s RETURNING profile_id, expires", (code,))
+            row = cur.fetchone()
+            if not row or row[1] < time.time():
+                return {"error": "Код не подошёл или устарел. Возьмите новый на первом устройстве."}
+            pid = row[0]
+            # новому устройству — свой ключ; в профиле добавляется только его хэш
+            sec = secrets.token_hex(32)
+            cur.execute("SELECT keys FROM english_profiles WHERE id = %s FOR UPDATE", (pid,))
+            prof = cur.fetchone()
+            if not prof:
+                return {"error": "Профиль не найден."}
+            keys = [*(prof[0] or []), _hash(sec)][-MAX_DEVICES:]   # самые старые устройства выпадают
+            cur.execute("UPDATE english_profiles SET keys = %s WHERE id = %s", (keys, pid))
+        return {"id": pid, "secret": sec}
+    except Exception as e:
+        print(f"⚠️ Код не принят: {e}")
+        return OFFLINE
+    finally:
+        conn.close()
+
+
+class LinkUseIn(BaseModel):
+    code: str = ""
+
+
 def build_router(ask, rate_ok, client_ip) -> APIRouter:
     router = APIRouter(prefix="/english", tags=["english"])
 
@@ -449,6 +648,33 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             return {"error": "Слишком много записей подряд. Передохните пару минут."}
         audio = await request.body()
         return hear(audio, request.headers.get("content-type", ""))
+
+    @router.post("/sync")
+    async def sync_endpoint(request: Request):
+        if not rate_ok(client_ip(request), 120, "esync"):
+            return {"error": "Слишком часто.", "offline": True}
+        try:
+            body = await request.json()
+        except Exception:
+            return {"error": "bad json"}
+        return sync(body if isinstance(body, dict) else {})
+
+    @router.post("/link/new")
+    async def link_new_endpoint(request: Request):
+        if not rate_ok(client_ip(request), 10, "elink"):
+            return {"error": "Слишком часто. Подождите пару минут."}
+        try:
+            body = await request.json()
+        except Exception:
+            return {"error": "bad json"}
+        return link_new(body if isinstance(body, dict) else {})
+
+    @router.post("/link/use")
+    def link_use_endpoint(body: LinkUseIn, request: Request):
+        # коды короткие, поэтому перебор надо душить строже всего
+        if not rate_ok(client_ip(request), 10, "elinkuse"):
+            return {"error": "Слишком много попыток. Подождите несколько минут."}
+        return link_use({"code": body.code})
 
     @router.post("/speak")
     def speak_endpoint(body: SpeakIn, request: Request):
