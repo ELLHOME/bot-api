@@ -532,9 +532,13 @@ def sync(body: dict, db=None) -> dict:
     if not auth:
         return {"error": "bad profile"}
     pid, sec = auth
-    conn = (db or _db)()
+    try:
+        conn = (db or _db)()
+    except Exception as e:
+        print(f"⚠️ База недоступна: {e}")
+        return {**OFFLINE, "detail": f"нет связи с базой ({type(e).__name__})"}
     if conn is None:
-        return OFFLINE
+        return {**OFFLINE, "detail": "на сервере не задан DATABASE_URL"}
     incoming = {"words": _clean_words(body.get("words")),
                 "level": str(body.get("level") or ""), "level_t": int(body.get("level_t") or 0),
                 "self": str(body.get("self") or ""), "self_t": int(body.get("self_t") or 0)}
@@ -560,7 +564,8 @@ def sync(body: dict, db=None) -> dict:
         return {"ok": True, **merged}
     except Exception as e:
         print(f"⚠️ Синхронизация не удалась: {e}")
-        return OFFLINE
+        # класс ошибки и код Postgres — без текста: в нём бывают адрес базы и имя пользователя
+        return {**OFFLINE, "detail": f"{type(e).__name__} {getattr(e, 'pgcode', '') or ''}".strip()}
     finally:
         conn.close()
 
