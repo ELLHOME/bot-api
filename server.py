@@ -271,7 +271,8 @@ EVENT_NAMES = {
     "page_view", "section_view", "lang_switch",
     "chat_open", "chat_tab", "chat_message", "chat_copy",
     "contact_click", "project_view",
-    "natal_chart",
+    "natal_chart", "natal_ask",       # natal_ask страница слала давно, а счётчик молча выкидывал
+    "english_start", "english_msg",
 }
 _events_ready = False
 
@@ -1151,6 +1152,15 @@ except Exception as _e:          # pragma: no cover
     NATAL_ERROR = str(_e)
     print(f"⚠️ Натальная карта не подключилась: {_e}")
 
+# Разговорный английский — тоже отдельный файл и отдельный лимит обращений.
+try:
+    from english_api import build_router as _english_router
+    app.include_router(_english_router(ask=ask, rate_ok=_rate_ok, client_ip=_client_ip))
+    ENGLISH_READY, ENGLISH_ERROR = True, ""
+except Exception as _e:          # pragma: no cover
+    ENGLISH_READY, ENGLISH_ERROR = False, str(_e)
+    print(f"⚠️ Английский не подключился: {_e}")
+
 
 class Msg(BaseModel):
     role: str
@@ -1181,6 +1191,7 @@ def health():
                      "last": LAST_NOTIFY, "webhook_secret": bool(TG_SECRET)},
         "database": bool(DATABASE_URL),
         "natal": {"ready": NATAL_READY, "error": NATAL_ERROR},
+        "english": {"ready": ENGLISH_READY, "error": ENGLISH_ERROR},
     }
 
 
