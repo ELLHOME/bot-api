@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 10
+READING_V = 11
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -294,7 +294,9 @@ def digest(ch: dict) -> dict:
     ang = [f"{a['a']} {a['type']} {a['b']}, расхождение {_arcmin(a['exact'])}"
            for a in (ch.get("angle_aspects") or [])[:8]]
     el = ch.get("elements") or {}
-    missing = [e for e in ("огонь", "земля", "воздух", "вода") if not el.get(e)]
+    rng = ch.get("elements_range")
+    missing = [e for e in ("огонь", "земля", "воздух", "вода")
+               if (rng.get(e, [0, 0])[1] == 0 if rng else not el.get(e))]
 
     return {
         "asc": ch["asc"]["label"],
@@ -318,6 +320,9 @@ def digest(ch: dict) -> dict:
         "elements_missing": missing,
         "modes": ch.get("modes") or {},
         "stelliums": [f"{g['where']}: {', '.join(g['who'])}"
+                      + (" (только если Луна в этом знаке — время рождения неизвестно)"
+                         if g.get("moon_dep") else
+                         " (Луна в нём под вопросом)" if g.get("min") != g.get("max") else "")
                       for g in (ch.get("stelliums") or [])],
         "stations": ch.get("stations") or [],
         "lilith": (ch.get("lilith") or {}).get("label", ""),
@@ -434,6 +439,13 @@ def _pos(ch: dict, name: str, houses: bool = True) -> str:
             + (", ретроградна" if p["retro"] else ""))
 
 
+def _counts(plain: dict, rng: dict | None) -> str:
+    if not rng:
+        return ", ".join(f"{k} {v}" for k, v in plain.items())
+    txt = ", ".join(f"{k} {a}" if a == b else f"{k} {a}–{b}" for k, (a, b) in rng.items())
+    return txt + " (вилка: знак Луны неизвестен)"
+
+
 def themes(ch: dict, time_known: bool = True) -> dict:
     d = digest(ch)
     # Время неизвестно — дома не называем вовсе: за сутки они проворачиваются
@@ -450,10 +462,12 @@ def themes(ch: dict, time_known: bool = True) -> dict:
              *[_asp(a) for a in (ch.get("angle_aspects") or []) if a["b"] == "ASC"][:3]]
            if time_known else [] ),
         _pos_(ch, "Луна"),
-        "стихии (сколько тел): " + ", ".join(f"{k} {v}" for k, v in el.items()),
-        "кресты: " + ", ".join(f"{k} {v}" for k, v in md.items()),
+        "стихии (сколько тел): " + _counts(el, ch.get("elements_range")),
+        "кресты: " + _counts(md, ch.get("modes_range")),
         *( ["пустые стихии: " + ", ".join(d["elements_missing"])] if d["elements_missing"] else [] ),
-        *( ["скопления: " + "; ".join(d["stelliums"])] if d["stelliums"] else [] ),
+        # без времени дома неизвестны — и скопления «в доме» тоже
+        *( ["скопления: " + "; ".join(st)] if (st := [x for x in d["stelliums"]
+                                                       if time_known or not x.startswith("дом")]) else [] ),
         *_aspects_of(ch, ["Солнце"], 3),
     ]
     t["feelings"] = [
@@ -785,7 +799,50 @@ def blur_moon(ch: dict, day0: dict, day1: dict) -> dict:
         if "Луна" in (a["a"], a["b"]):
             a["vague"] = True
             a["all_day"] = pair(a) in seen0 and pair(a) in seen1
+    if len(signs) > 1:
+        _blur_counts(ch, signs)
     return ch
+
+
+# Эти тела в расклад по стихиям и крестам не входят — так же, как в natal.py.
+NOT_COUNTED = ("Сев. узел", "Хирон", "Прозерпина", "Селена")
+
+
+def _blur_counts(ch: dict, signs: list[str]) -> None:
+    """Луна могла быть в любом из знаков signs — значит, и стихии, и кресты,
+    и скопления известны только вилкой. Считаем каждый вариант и храним
+    наименьшее и наибольшее, а не цифру одного полудня."""
+    el_v, mo_v, st_v = [], [], []
+    for sg in signs:
+        el, mo, grp = {}, {}, {}
+        for p in ch["planets"]:
+            sign = sg if p["name"] == "Луна" else p["sign"]
+            grp.setdefault(sign, []).append(p["name"])
+            if p["name"] in NOT_COUNTED:
+                continue
+            e, m = engine.ELEMENT[sign], engine.MODE[sign]
+            el[e] = el.get(e, 0) + 1
+            mo[m] = mo.get(m, 0) + 1
+        el_v.append(el); mo_v.append(mo); st_v.append(grp)
+
+    def span(variants):
+        keys = {k for v in variants for k in v}
+        return {k: [min(v.get(k, 0) for v in variants), max(v.get(k, 0) for v in variants)]
+                for k in keys}
+    ch["elements_range"] = span(el_v)
+    ch["modes_range"] = span(mo_v)
+
+    # Скопление — три тела и больше в знаке. Если без Луны их два, скопление
+    # есть лишь в том варианте, где Луна в этом знаке, — так и помечаем.
+    out = [g for g in (ch.get("stelliums") or []) if not g["where"].startswith("знак")]
+    sign_keys = {k for grp in st_v for k, v in grp.items() if len(v) >= 3}
+    for k in sorted(sign_keys):
+        sizes = [len(grp.get(k, [])) for grp in st_v]
+        who = max((grp.get(k, []) for grp in st_v), key=len)
+        out.append({"where": f"знак {k}", "who": who,
+                    "min": min(sizes), "max": max(sizes),
+                    "moon_dep": min(sizes) < 3})
+    ch["stelliums"] = out
 
 
 def _moon_words(ch: dict) -> str:
