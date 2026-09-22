@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 11
+READING_V = 12
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -691,6 +691,40 @@ def _fallback_reading(d: dict) -> dict:
     }
 
 
+def _parse_part(raw: str, ids) -> dict:
+    """JSON от модели ломается чаще, чем хотелось бы: кавычки "…" внутри
+    русского текста, обрезанный хвост, обёртка ```json. Сначала пробуем
+    честный разбор, потом вытаскиваем каждый раздел по его ключу — текст
+    раздела тянется до следующего известного ключа или до конца объекта."""
+    if not raw or raw.startswith("⚠️"):
+        return {}
+    m = re.search(r"\{.*\}", raw, re.S)
+    if m:
+        try:
+            out = json.loads(m.group(0))
+            if isinstance(out, dict) and isinstance(out.get("sections"), dict):
+                return out
+        except Exception:
+            pass
+    keys = list(ids) + ["summary", "fields"]
+    stop = "|".join(re.escape(k) for k in keys)
+    secs = {}
+    for k in ids:
+        mm = re.search(rf'"{re.escape(k)}"\s*:\s*"(.*?)"\s*(?=,\s*"(?:{stop})"\s*:|\}}|$)', raw, re.S)
+        if mm:
+            secs[k] = mm.group(1).replace('\\n', "\n").replace('\\"', '"').strip()
+    if not secs:
+        return {}
+    out = {"sections": secs}
+    ms = re.search(r'"summary"\s*:\s*"(.*?)"\s*(?=,|\}|$)', raw, re.S)
+    if ms:
+        out["summary"] = ms.group(1).strip()
+    mf = re.search(r'"fields"\s*:\s*\[(.*?)\]', raw, re.S)
+    if mf:
+        out["fields"] = re.findall(r'"([^"]{2,40})"', mf.group(1))
+    return out
+
+
 def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
                   sig: list | None = None, ch: dict | None = None,
                   time_known: bool = True) -> dict:
@@ -708,14 +742,9 @@ def _profile_part(part: dict, t: dict, fict_warn: str, unknown_note: str, ask,
     except Exception as e:
         print(f"⚠️ Разбор {part['ids']} не сгенерировался: {e}")
         return {}
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return {}
-    try:
-        out = json.loads(m.group(0))
-    except Exception:
-        return {}
-    if not isinstance(out, dict):
+    out = _parse_part(raw, part["ids"])
+    if not out:
+        print(f"⚠️ Разбор {part['ids']} не разобрался: {raw[:300]!r}")
         return {}
     # что не исправилось с повтора — вычищаем по предложениям
     secs = out.get("sections")
@@ -742,9 +771,18 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(PROFILE_PARTS)) as pool:
         sig = signature(ch, time_known)
-        outs = list(pool.map(lambda p: _profile_part(p, t, fict, unknown, ask, sig,
-                                                      ch, time_known),
-                             PROFILE_PARTS))
+        run = lambda p: _profile_part(p, t, fict, unknown, ask, sig, ch, time_known)
+        outs = list(pool.map(run, PROFILE_PARTS))
+        # Половина не пришла (модель занята, JSON сломан) — один повтор,
+        # иначе человек молча получает три раздела из шести.
+        for i, (part, out) in enumerate(zip(PROFILE_PARTS, outs)):
+            got = out.get("sections") if isinstance(out.get("sections"), dict) else {}
+            if sum(1 for k in part["ids"] if isinstance(got.get(k), str) and len(got[k]) >= 40) < len(part["ids"]):
+                print(f"⚠️ Повторяю разбор {part['ids']}")
+                again = run(part)
+                g2 = again.get("sections") if isinstance(again.get("sections"), dict) else {}
+                if len(g2) >= len(got):
+                    outs[i] = again
 
     titles = dict(THEMES)
     sections, summary = [], ""
@@ -770,7 +808,9 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
     if not sections:
         return {**_fallback_reading(d), "lead": lead, "sections": [], "summary": ""}
     return {"lead": lead, "summary": summary, "sections": sections,
-            "blocks": [], "verdict": ""}
+            "blocks": [], "verdict": "",
+            # неполный разбор не кладём в кэш: следующий заход попробует снова
+            "partial": len(sections) < len(THEMES)}
 
 
 def _lead_no_time(ch: dict) -> str:
@@ -1382,7 +1422,7 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
                      "до 15 градусов."),
         }
         # В кэш карты кладём только то, что не зависит от сегодняшнего дня.
-        if cached is None:
+        if cached is None and not reading.get("partial") and reading.get("sections"):
             _cache_put("natal_readings", "key", key, {"reading": reading})
         return payload
 
