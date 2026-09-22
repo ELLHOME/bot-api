@@ -33,7 +33,7 @@ MIN_YEAR = 1900
 # Версия толкования. Меняем её, когда правим промпт: старые разборы в кэше
 # написаны прежним голосом, и отдавать их вперемешку с новыми нечестно.
 # Строки с прошлой версией просто перестают находиться.
-READING_V = 9
+READING_V = 10
 
 # Версия раздела «что сейчас». Он живёт своим кэшем: карта рождения
 # не меняется никогда, а небо над ней — каждый день.
@@ -370,6 +370,11 @@ def _asp_tag(a: dict) -> str:
 
 
 def _asp(a: dict) -> str:
+    if a.get("vague"):
+        how = ("держится весь день, но точность неизвестна — не называй его точным"
+               if a.get("all_day") else
+               "есть лишь при части часов рождения — упоминай только как возможный")
+        return f"{a['a']} {a['type']} {a['b']} [НЕТОЧНО: время неизвестно, {how}]"
     return f"{a['a']} {a['type']} {a['b']} ({_arcmin(a['exact'])}) {_asp_tag(a)}"
 
 
@@ -422,6 +427,8 @@ def _pos(ch: dict, name: str, houses: bool = True) -> str:
     p = next((x for x in ch["planets"] if x["name"] == name), None)
     if not p:
         return ""
+    if name == "Луна" and ch.get("moon_span"):
+        return _moon_words(ch)
     return (f"{name} в знаке {p['label']} {_shared(name)}"
             + (f"; {p['house']}-й дом {MINE}" if houses else "")
             + (", ретроградна" if p["retro"] else ""))
@@ -451,7 +458,8 @@ def themes(ch: dict, time_known: bool = True) -> dict:
     ]
     t["feelings"] = [
         _pos_(ch, "Луна"),
-        d["moon_phase"],
+        # без времени угол Луна–Солнце известен лишь в пределах суток
+        (d["moon_phase"].split(", Луна отошла")[0] if ch.get("moon_span") else d["moon_phase"]),
         *_aspects_of(ch, ["Луна"], 4),
         *( _house_line(ch, 4) if time_known else [] ),
     ]
@@ -712,9 +720,10 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
     fict = FICT_WARNING if any(p.get("fictional") for p in ch["planets"]) else ""
     unknown = ("" if time_known else
                "\n\nВАЖНО. Время рождения неизвестно, карта построена на полдень. "
-               "Домов, асцендента и середины неба нет — не упоминай их. Луна может "
-               "стоять на семь градусов в любую сторону: если она близко к границе "
-               "знака, говори о ней осторожно.")
+               "Домов, асцендента и середины неба нет — не упоминай их. Положение Луны "
+               "известно только в пределах суток: у её аспектов нет точности, не "
+               "называй их точными и не строй на них главный вывод. Если знак Луны "
+               "не определён, так и скажи и опиши оба варианта коротко.")
 
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(PROFILE_PARTS)) as pool:
@@ -752,9 +761,55 @@ def interpret(ch: dict, ask, time_known: bool = True) -> dict:
 
 def _lead_no_time(ch: dict) -> str:
     by = {p["name"]: p for p in ch["planets"]}
+    span = ch.get("moon_span") or {}
+    signs = span.get("signs") or [by["Луна"]["sign"]]
+    moon = " или ".join(IN_SIGN.get(x, "в " + x) for x in signs)
+    moon = moon.replace(" или в ", " или ")
     return (f'Солнце {IN_SIGN.get(by["Солнце"]["sign"], "в " + by["Солнце"]["sign"])}, '
-            f'Луна {IN_SIGN.get(by["Луна"]["sign"], "в " + by["Луна"]["sign"])}. '
+            f'Луна {moon}. '
             'Время рождения не указано, поэтому без асцендента и домов.')
+
+def blur_moon(ch: dict, day0: dict, day1: dict) -> dict:
+    """Время рождения неизвестно — Луна за эти сутки прошла 12–15 градусов.
+    Карта на полдень ставит её в одну точку, и аспект «0,39° от точного»
+    выглядит как находка, хотя в полночь он был бы в пяти градусах. Помечаем
+    всё лунное честно: где Луна могла быть и держится ли аспект весь день."""
+    by = lambda c: next(p for p in c["planets"] if p["name"] == "Луна")
+    m0, m1 = by(day0), by(day1)
+    signs = list(dict.fromkeys([m0["sign"], by(ch)["sign"], m1["sign"]]))
+    ch["moon_span"] = {"from": m0["label"], "to": m1["label"], "signs": signs}
+    pair = lambda a: (frozenset((a["a"], a["b"])), a["type"])
+    seen0 = {pair(a) for a in day0["aspects"]}
+    seen1 = {pair(a) for a in day1["aspects"]}
+    for a in ch["aspects"]:
+        if "Луна" in (a["a"], a["b"]):
+            a["vague"] = True
+            a["all_day"] = pair(a) in seen0 and pair(a) in seen1
+    return ch
+
+
+def _moon_words(ch: dict) -> str:
+    span = ch.get("moon_span")
+    if not span:
+        return ""
+    if len(span["signs"]) == 1:
+        return (f"Луна весь этот день в знаке {span['signs'][0]} "
+                f"(от {span['from']} до {span['to']}); точный градус неизвестен")
+    return (f"Луна в этот день перешла из знака {span['signs'][0]} в {span['signs'][-1]} "
+            f"(от {span['from']} до {span['to']}): знак Луны НЕ ОПРЕДЕЛЁН, "
+            f"говори «{span['signs'][0]} или {span['signs'][-1]}»")
+
+
+def _blur(ch: dict, when, tz: str, lat: float, lon: float, school: str) -> dict:
+    """Карты на начало и конец тех же суток — чтобы знать, где могла быть Луна."""
+    try:
+        d0 = engine.chart(when.replace(hour=0, minute=1), tz, lat, lon, school=school)
+        d1 = engine.chart(when.replace(hour=23, minute=59), tz, lat, lon, school=school)
+    except Exception as e:
+        print(f"⚠️ Сутки для Луны не посчитались: {e}")
+        return ch
+    return blur_moon(ch, d0, d1)
+
 
 def _trust_hits(tr: dict | None, time_known: bool) -> dict | None:
     """Без времени рождения углы карты взяты с полудня, а натальная Луна
@@ -1091,7 +1146,7 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask,
         **({"самое редкое в карте — точные углы к асценденту и MC": sig} if sig else {}),
         "карта рождения по темам": {TOPIC_HINT[k]: t[k] for k in pick},
         "самые точные аспекты": [
-            _asp(a) for a in ch["aspects"][:6]],
+            _asp(a) for a in [x for x in ch["aspects"] if not x.get("vague")][:6]],
     }
     if time_known:
         facts["углы карты"] = {"асцендент": ch["asc"]["label"], "середина неба": ch["mc"]["label"]}
@@ -1112,7 +1167,8 @@ def answer_question(ch: dict, tr: dict | None, question: str, ask,
         talk = "\n\nРАНЬШЕ В ЭТОМ РАЗГОВОРЕ:" + talk
     note = ("" if time_known else
             "\n\nВремя рождения неизвестно: домов, асцендента и середины неба нет, "
-            "не упоминай их.")
+            "не упоминай их. Положение Луны известно только в пределах суток — "
+            "её аспекты не называй точными.")
     warn = FICT_WARNING if any(p.get("fictional") for p in ch["planets"]) else ""
     prompt = ("Факты:\n" + json.dumps(facts, ensure_ascii=False, indent=1) + note + warn +
               talk + "\n\nВопрос человека: " + question.strip() +
@@ -1213,6 +1269,8 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
 
         try:
             ch = engine.chart(when, tz, body.lat, body.lon, school=school)
+            if body.unknown_time:
+                ch = _blur(ch, when, tz, body.lat, body.lon, school)
         except Exception as e:
             print(f"⚠️ Карта не посчиталась: {e}")
             return {"error": "Расчёт не сошёлся. Проверьте дату и место."}
@@ -1295,8 +1353,10 @@ def build_router(ask, rate_ok, client_ip) -> APIRouter:
             return {"error": "Координаты вне Земли."}
 
         try:
-            ch = engine.chart(when, tz, body.lat, body.lon,
-                              school=body.school if body.school in SCHOOLS else "classic")
+            school = body.school if body.school in SCHOOLS else "classic"
+            ch = engine.chart(when, tz, body.lat, body.lon, school=school)
+            if body.unknown_time:
+                ch = _blur(ch, when, tz, body.lat, body.lon, school)
         except Exception as e:
             print(f"⚠️ Карта не посчиталась: {e}")
             return {"error": "Расчёт не сошёлся."}
