@@ -172,9 +172,9 @@ def call_model(messages: list[dict], temperature: float | None = None) -> str:
             api_key=key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-        kw = {"temperature": temperature} if temperature is not None else {}
+        # Gemini uses its model defaults; custom sampling parameters may be rejected.
         return (client.chat.completions.create(
-            model=GEMINI_MODEL, messages=messages, **kw
+            model=GEMINI_MODEL, messages=messages
         ).choices[0].message.content or "")
     except Exception as e:
         # Чаще всего это кончившийся баланс или отозванный ключ. Пишем владельцу

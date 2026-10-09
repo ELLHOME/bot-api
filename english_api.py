@@ -337,7 +337,7 @@ def _hear_request(model: str, audio: bytes, mime: str, key: str, opener=None) ->
             {"text": HEAR_PROMPT},
             {"inlineData": {"mimeType": mime, "data": base64.b64encode(audio).decode()}},
         ]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json"},
     }
     req = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
