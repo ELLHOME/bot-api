@@ -38,7 +38,8 @@ ALLOWED_ANGLES = ("front", "side", "back", "side2")
 ALLOWED_MIMES = {"image/jpeg", "image/png", "image/webp"}
 MAX_PHOTOS = 4
 MAX_PHOTO_BYTES = 1_600_000          # ~1.6 МБ на одно сжатое фото (клиент шлёт ~60-150 КБ)
-FITNESS_RATE_MAX = int(os.getenv("FITNESS_RATE_MAX", "6"))  # анализов за 10 мин с одного IP
+FITNESS_RATE_MAX = int(os.getenv("FITNESS_RATE_MAX", "6"))  # анализов фигуры за 10 мин с одного IP
+MEAL_RATE_MAX = int(os.getenv("MEAL_RATE_MAX", "15"))       # анализов еды за 10 мин с одного IP
 
 ANGLE_TITLES = {
     "front": "Фото спереди (фронт)",
@@ -47,12 +48,27 @@ ANGLE_TITLES = {
     "side2": "Фото со второго бока",
 }
 
+MEAL_TYPE_LABELS = {
+    "breakfast": "Завтрак",
+    "lunch": "Обед",
+    "dinner": "Ужин",
+    "snack": "Перекус",
+}
+
 
 class FitnessAnalyzeIn(BaseModel):
     profile: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
     photos: dict[str, str] = {}
     catalog: list[dict[str, Any]] = []
+
+
+class MealAnalyzeIn(BaseModel):
+    photo: str = ""
+    note: str = ""
+    mealType: str = "lunch"
+    profile: dict[str, Any] = {}
+    dailyTarget: dict[str, Any] = {}
 
 
 def _parse_data_url(data_url: str) -> tuple[str, str]:
@@ -189,7 +205,8 @@ def _call_gemini_vision(
 ) -> dict[str, Any]:
     parts: list[dict[str, Any]] = [{"text": prompt}]
     for angle, mime, b64_data in parsed_photos:
-        parts.append({"text": f"Ракурс: {ANGLE_TITLES.get(angle, angle)}"})
+        label = "Фото блюда" if angle == "meal" else f"Ракурс: {ANGLE_TITLES.get(angle, angle)}"
+        parts.append({"text": label})
         parts.append({"inlineData": {"mimeType": mime, "data": b64_data}})
 
     payload = {
@@ -286,6 +303,189 @@ def analyze_body(
     }
 
 
+def _build_meal_prompt(
+    note: str,
+    meal_type: str,
+    profile: dict[str, Any],
+    daily_target: dict[str, Any],
+    has_photo: bool,
+) -> str:
+    safe_profile = {
+        "goal": str((profile or {}).get("goal") or "recomp")[:30],
+        "weightKg": (profile or {}).get("weightKg"),
+        "sex": str((profile or {}).get("sex") or "male")[:20],
+    }
+    safe_target = {
+        "targetKcal": (daily_target or {}).get("targetKcal"),
+        "proteinGrams": (daily_target or {}).get("proteinGrams"),
+        "fatGrams": (daily_target or {}).get("fatGrams"),
+        "carbsGrams": (daily_target or {}).get("carbsGrams"),
+    }
+    clean_note = (note or "").strip()[:600]
+    meal_label = MEAL_TYPE_LABELS.get(str(meal_type or "").lower(), "Приём пищи")
+    source_desc = (
+        "Тебе передано фото блюда" + (f" и пояснение пользователя: «{clean_note}»." if clean_note else ".")
+        if has_photo
+        else f"Пользователь описал блюдо текстом (без фото): «{clean_note}»."
+    )
+    return (
+        "Ты — опытный спортивный нутрициолог. "
+        f"{source_desc}\n"
+        f"Тип приёма пищи: {meal_label}.\n"
+        f"Профиль пользователя: {json.dumps(safe_profile, ensure_ascii=False)}\n"
+        f"Дневные ориентиры: {json.dumps(safe_target, ensure_ascii=False)}\n\n"
+        "Задача:\n"
+        "1) Определи блюдо и разбей его на конкретные видимые/указанные ингредиенты (включая соусы, масло при жарке, хлеб, напитки, если видны или указаны).\n"
+        "2) Для каждого ингредиента оцени реалистичный вес в граммах, калорийность (ккал), белки (г), жиры (г), углеводы (г) и клетчатку (г).\n"
+        "3) Учитывай реальную калорийность ГОТОВЫХ блюд (например, варёная гречка/рис ~110–130 ккал на 100 г, а не сухая крупа 350 ккал/100 г).\n"
+        "4) Дай короткий практичный комментарий под цель пользователя и 1–2 совета.\n\n"
+        "Верни СТРОГО валидный JSON на русском языке без markdown-обёртки:\n"
+        "{\n"
+        '  "dishName": "Короткое понятное название блюда",\n'
+        '  "confidence": "high" | "medium" | "low",\n'
+        '  "portionNote": "Как оценена порция (например: стандартная тарелка ~24 см, ~380 г)",\n'
+        '  "ingredients": [\n'
+        "    {\n"
+        '      "name": "Куриная грудка на гриле",\n'
+        '      "grams": 160,\n'
+        '      "kcal": 264,\n'
+        '      "protein": 49.6,\n'
+        '      "fat": 5.8,\n'
+        '      "carbs": 0,\n'
+        '      "fiber": 0\n'
+        "    }\n"
+        "  ],\n"
+        '  "healthScore": 85,\n'
+        '  "goalFeedback": "1–2 предложения оценки блюда под цель пользователя",\n'
+        '  "tips": ["Короткий совет 1", "Короткий совет 2"]\n'
+        "}"
+    )
+
+
+def _normalize_meal_result(raw: dict[str, Any]) -> dict[str, Any]:
+    def num(val: Any, default: float = 0.0, lo: float = 0.0, hi: float = 5000.0) -> float:
+        try:
+            v = float(val)
+            if v != v:  # NaN
+                return default
+            return max(lo, min(hi, v))
+        except Exception:
+            return default
+
+    raw_ings = raw.get("ingredients") if isinstance(raw.get("ingredients"), list) else []
+    ingredients: list[dict[str, Any]] = []
+    for item in raw_ings[:20]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:80]
+        if not name:
+            continue
+        grams = int(round(num(item.get("grams"), 100.0, 1.0, 2500.0)))
+        kcal = int(round(num(item.get("kcal"), 0.0, 0.0, 4000.0)))
+        protein = round(num(item.get("protein"), 0.0, 0.0, 300.0), 1)
+        fat = round(num(item.get("fat"), 0.0, 0.0, 300.0), 1)
+        carbs = round(num(item.get("carbs"), 0.0, 0.0, 500.0), 1)
+        fiber = round(num(item.get("fiber"), 0.0, 0.0, 100.0), 1)
+        if kcal == 0 and (protein > 0 or fat > 0 or carbs > 0):
+            kcal = int(round(protein * 4 + fat * 9 + carbs * 4))
+        ingredients.append({
+            "name": name,
+            "grams": grams,
+            "kcal": kcal,
+            "protein": protein,
+            "fat": fat,
+            "carbs": carbs,
+            "fiber": fiber,
+        })
+
+    if not ingredients:
+        t = raw.get("totals") if isinstance(raw.get("totals"), dict) else {}
+        ingredients.append({
+            "name": str(raw.get("dishName") or "Блюдо").strip()[:80] or "Блюдо",
+            "grams": int(round(num(t.get("grams"), 250.0, 10.0, 2500.0))),
+            "kcal": int(round(num(t.get("kcal"), 350.0, 0.0, 4000.0))),
+            "protein": round(num(t.get("protein"), 20.0, 0.0, 300.0), 1),
+            "fat": round(num(t.get("fat"), 12.0, 0.0, 300.0), 1),
+            "carbs": round(num(t.get("carbs"), 35.0, 0.0, 500.0), 1),
+            "fiber": round(num(t.get("fiber"), 4.0, 0.0, 100.0), 1),
+        })
+
+    totals = {
+        "grams": int(sum(x["grams"] for x in ingredients)),
+        "kcal": int(sum(x["kcal"] for x in ingredients)),
+        "protein": round(sum(x["protein"] for x in ingredients), 1),
+        "fat": round(sum(x["fat"] for x in ingredients), 1),
+        "carbs": round(sum(x["carbs"] for x in ingredients), 1),
+        "fiber": round(sum(x["fiber"] for x in ingredients), 1),
+    }
+    conf = str(raw.get("confidence") or "medium").strip().lower()
+    if conf not in ("high", "medium", "low"):
+        conf = "medium"
+    tips = [
+        str(x).strip()[:180]
+        for x in (raw.get("tips") if isinstance(raw.get("tips"), list) else [])
+        if str(x).strip()
+    ][:3]
+    return {
+        "dishName": str(raw.get("dishName") or ingredients[0]["name"]).strip()[:100],
+        "confidence": conf,
+        "portionNote": str(raw.get("portionNote") or "").strip()[:180],
+        "ingredients": ingredients,
+        "totals": totals,
+        "healthScore": int(round(num(raw.get("healthScore"), 78.0, 10.0, 100.0))),
+        "goalFeedback": str(raw.get("goalFeedback") or "").strip()[:320],
+        "tips": tips,
+    }
+
+
+def analyze_meal(
+    photo: str,
+    note: str,
+    meal_type: str,
+    profile: dict[str, Any],
+    daily_target: dict[str, Any],
+    opener=None,
+) -> tuple[int, dict[str, Any]]:
+    key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not key or "..." in key:
+        return 503, {"ok": False, "error": "Серверный ключ AI Vision (GOOGLE_API_KEY) не настроен."}
+
+    clean_note = (note or "").strip()[:600]
+    parsed_photos: list[tuple[str, str, str]] = []
+    if photo and str(photo).strip():
+        try:
+            mime, b64_data = _parse_data_url(photo)
+        except ValueError as err:
+            return 400, {"ok": False, "error": str(err)}
+        parsed_photos.append(("meal", mime, b64_data))
+
+    if not parsed_photos and len(clean_note) < 3:
+        return 400, {"ok": False, "error": "Загрузите фото блюда или напишите, что вы съели."}
+
+    prompt = _build_meal_prompt(clean_note, meal_type, profile or {}, daily_target or {}, bool(parsed_photos))
+    errors: list[str] = []
+    for model in VISION_MODELS:
+        try:
+            raw = _call_gemini_vision(model, key, prompt, parsed_photos, opener=opener)
+            meal = _normalize_meal_result(raw)
+            return 200, {
+                "ok": True,
+                "provider": "gemini",
+                "model": model,
+                "meal": meal,
+            }
+        except Exception as exc:
+            print(f"⚠️ Fitness Meal Vision ({model}) не сработал: {exc}")
+            errors.append(f"{model}: {exc}")
+            continue
+
+    return 502, {
+        "ok": False,
+        "error": "AI-анализ еды сейчас временно недоступен. Попробуйте ещё раз через минуту.",
+        "detail": " · ".join(errors)[:360],
+    }
+
+
 def build_router(rate_ok, client_ip) -> APIRouter:
     router = APIRouter(prefix="/fitness", tags=["fitness"])
 
@@ -313,6 +513,25 @@ def build_router(rate_ok, client_ip) -> APIRouter:
                 status_code=429,
             )
         status, payload = analyze_body(body.profile, body.metrics, body.photos, body.catalog)
+        return JSONResponse(payload, status_code=status)
+
+    @router.post("/meal")
+    def fitness_meal(body: MealAnalyzeIn, request: Request):
+        if not rate_ok(client_ip(request), MEAL_RATE_MAX, "fmeal"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Слишком много запросов анализа еды подряд. Подождите несколько минут.",
+                },
+                status_code=429,
+            )
+        status, payload = analyze_meal(
+            body.photo,
+            body.note,
+            body.mealType,
+            body.profile,
+            body.dailyTarget,
+        )
         return JSONResponse(payload, status_code=status)
 
     return router
