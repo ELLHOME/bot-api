@@ -120,6 +120,8 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",       # Vite dev
     "http://localhost:4173",       # Vite preview
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",       # BodyCoach локальный сервер
+    "http://localhost:8080",
 ]
 # RU: можно переопределить через переменную окружения (через запятую)
 extra = os.getenv("ALLOWED_ORIGINS")
@@ -1161,6 +1163,15 @@ except Exception as _e:          # pragma: no cover
     ENGLISH_READY, ENGLISH_ERROR = False, str(_e)
     print(f"⚠️ Английский не подключился: {_e}")
 
+# Фитнес-анализ фигуры по фото (BodyCoach AI) — отдельный файл и отдельный лимит.
+try:
+    from fitness_api import build_router as _fitness_router
+    app.include_router(_fitness_router(rate_ok=_rate_ok, client_ip=_client_ip))
+    FITNESS_READY, FITNESS_ERROR = True, ""
+except Exception as _e:          # pragma: no cover
+    FITNESS_READY, FITNESS_ERROR = False, str(_e)
+    print(f"⚠️ Фитнес-анализ не подключился: {_e}")
+
 
 class Msg(BaseModel):
     role: str
@@ -1192,6 +1203,7 @@ def health():
         "database": bool(DATABASE_URL),
         "natal": {"ready": NATAL_READY, "error": NATAL_ERROR},
         "english": {"ready": ENGLISH_READY, "error": ENGLISH_ERROR},
+        "fitness": {"ready": FITNESS_READY, "error": FITNESS_ERROR},
     }
 
 
