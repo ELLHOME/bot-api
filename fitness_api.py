@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -40,6 +41,31 @@ MAX_PHOTOS = 4
 MAX_PHOTO_BYTES = 1_600_000          # ~1.6 МБ на одно сжатое фото (клиент шлёт ~60-150 КБ)
 FITNESS_RATE_MAX = int(os.getenv("FITNESS_RATE_MAX", "6"))  # анализов фигуры за 10 мин с одного IP
 MEAL_RATE_MAX = int(os.getenv("MEAL_RATE_MAX", "15"))       # анализов еды за 10 мин с одного IP
+# Окно в 10 минут не мешает растянуть перебор на весь день, поэтому есть и суточные
+# лимиты на IP, и общий потолок AI-запросов за сутки (UTC) — он ограничивает счёт за Gemini.
+FITNESS_DAILY_MAX = int(os.getenv("FITNESS_DAILY_MAX", "20"))  # анализов фигуры в сутки с одного IP
+MEAL_DAILY_MAX = int(os.getenv("MEAL_DAILY_MAX", "60"))        # анализов еды в сутки с одного IP
+AI_DAILY_CAP = int(os.getenv("FITNESS_AI_DAILY_CAP", "400"))   # всех AI-запросов фитнеса в сутки
+
+_daily: dict[str, int] = {}
+_daily_day = ""
+
+
+def _daily_take(ip: str, bucket: str, ip_limit: int) -> str:
+    """Проверяет и списывает суточные лимиты. Возвращает "" или причину отказа: "ip" / "cap"."""
+    global _daily_day
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if day != _daily_day:
+        _daily.clear()
+        _daily_day = day
+    ip_key = f"{bucket}|{ip}"
+    if _daily.get("*", 0) >= AI_DAILY_CAP:
+        return "cap"
+    if _daily.get(ip_key, 0) >= ip_limit:
+        return "ip"
+    _daily["*"] = _daily.get("*", 0) + 1
+    _daily[ip_key] = _daily.get(ip_key, 0) + 1
+    return ""
 
 ANGLE_TITLES = {
     "front": "Фото спереди (фронт)",
@@ -486,8 +512,32 @@ def analyze_meal(
     }
 
 
-def build_router(rate_ok, client_ip) -> APIRouter:
+def build_router(rate_ok, client_ip, notify=None) -> APIRouter:
     router = APIRouter(prefix="/fitness", tags=["fitness"])
+
+    def _limited(request: Request, bucket: str, burst_max: int, daily_max: int, burst_msg: str):
+        ip = client_ip(request)
+        if not rate_ok(ip, burst_max, bucket):
+            return JSONResponse({"ok": False, "error": burst_msg}, status_code=429)
+        reason = _daily_take(ip, bucket, daily_max)
+        if reason == "ip":
+            return JSONResponse(
+                {"ok": False, "error": "Дневной лимит AI-анализов исчерпан. Попробуйте завтра — локальный анализ работает без ограничений."},
+                status_code=429,
+            )
+        if reason == "cap":
+            if notify:
+                notify(
+                    f"⚠️ Силуэтика: исчерпан общий суточный лимит AI-запросов ({AI_DAILY_CAP}). "
+                    "До полуночи UTC AI-анализ отключён. Если это не наплыв людей, а перебор — проверьте логи Render.",
+                    throttle_key=f"fitness_cap_{_daily_day}",
+                    throttle_sec=86400,
+                )
+            return JSONResponse(
+                {"ok": False, "error": "AI-анализ на сегодня временно недоступен из-за высокой нагрузки. Попробуйте завтра — локальный анализ работает без ограничений."},
+                status_code=429,
+            )
+        return None
 
     @router.get("/health")
     def fitness_health(request: Request):
@@ -504,27 +554,23 @@ def build_router(rate_ok, client_ip) -> APIRouter:
 
     @router.post("/analyze")
     def fitness_analyze(body: FitnessAnalyzeIn, request: Request):
-        if not rate_ok(client_ip(request), FITNESS_RATE_MAX, "fitness"):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "Слишком много AI-разборов подряд. Подождите несколько минут — локальный анализ работает без ограничений.",
-                },
-                status_code=429,
-            )
+        blocked = _limited(
+            request, "fitness", FITNESS_RATE_MAX, FITNESS_DAILY_MAX,
+            "Слишком много AI-разборов подряд. Подождите несколько минут — локальный анализ работает без ограничений.",
+        )
+        if blocked:
+            return blocked
         status, payload = analyze_body(body.profile, body.metrics, body.photos, body.catalog)
         return JSONResponse(payload, status_code=status)
 
     @router.post("/meal")
     def fitness_meal(body: MealAnalyzeIn, request: Request):
-        if not rate_ok(client_ip(request), MEAL_RATE_MAX, "fmeal"):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "Слишком много запросов анализа еды подряд. Подождите несколько минут.",
-                },
-                status_code=429,
-            )
+        blocked = _limited(
+            request, "fmeal", MEAL_RATE_MAX, MEAL_DAILY_MAX,
+            "Слишком много запросов анализа еды подряд. Подождите несколько минут.",
+        )
+        if blocked:
+            return blocked
         status, payload = analyze_meal(
             body.photo,
             body.note,

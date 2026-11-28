@@ -20,6 +20,7 @@ import datetime
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -83,8 +84,18 @@ def notify_owner(text: str, throttle_key: str = "", throttle_sec: int = 3600) ->
         return False
 
 
+# Render отдаёт запросы через Cloudflare: эти заголовки ставит сам Cloudflare и
+# затирает присланные клиентом. Первый адрес в X-Forwarded-For клиент пишет сам,
+# и лимиты обходились подстановкой любого адреса в каждом запросе.
+_TRUSTED_IP_HEADERS = ("cf-connecting-ip", "true-client-ip")
+
+
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")   # за прокси Render
+    for name in _TRUSTED_IP_HEADERS:
+        value = (request.headers.get(name) or "").strip()
+        if value:
+            return value
+    fwd = request.headers.get("x-forwarded-for")   # локально и без Cloudflare
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
@@ -112,6 +123,9 @@ def _rate_ok(ip: str, limit: int | None = None, bucket: str = "") -> bool:
         for k in [k for k, v in _hits.items() if not any(now - t < RATE_WINDOW for t in v)]:
             _hits.pop(k, None)
     return True
+
+
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(10 * 1024 * 1024)))  # 4 фото по 1.6 МБ в base64 — ~8.5 МБ
 
 # RU: домены, которым разрешено обращаться к API (CORS). Добавь свой прод-домен.
 # EN: origins allowed to call the API (CORS). Add your production domain.
@@ -1133,6 +1147,22 @@ def handle_tg_update(update: dict) -> None:
 # ── HTTP API ─────────────────────────────────────────────────────────
 app = FastAPI(title="ELLHOME bot API")
 
+
+@app.middleware("http")
+async def _limit_body(request: Request, call_next):
+    """Огромный запрос отбиваем до разбора JSON, чтобы он не съел память сервера."""
+    if request.method == "POST":
+        size = request.headers.get("content-length")
+        if size is None or not size.isdigit():
+            # Браузер всегда шлёт размер; без него тело фото-анализа нельзя проверить заранее.
+            if request.url.path.startswith("/fitness/"):
+                return JSONResponse({"ok": False, "error": "Не указан размер запроса."}, status_code=411)
+        elif int(size) > MAX_BODY_BYTES:
+            return JSONResponse({"ok": False, "error": "Слишком большой запрос."}, status_code=413)
+    return await call_next(request)
+
+
+# CORS добавлен после ограничителя, поэтому он внешний и подписывает и ответы 411/413.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -1166,7 +1196,7 @@ except Exception as _e:          # pragma: no cover
 # Фитнес-анализ фигуры по фото (BodyCoach AI) — отдельный файл и отдельный лимит.
 try:
     from fitness_api import build_router as _fitness_router
-    app.include_router(_fitness_router(rate_ok=_rate_ok, client_ip=_client_ip))
+    app.include_router(_fitness_router(rate_ok=_rate_ok, client_ip=_client_ip, notify=notify_owner))
     FITNESS_READY, FITNESS_ERROR = True, ""
 except Exception as _e:          # pragma: no cover
     FITNESS_READY, FITNESS_ERROR = False, str(_e)
