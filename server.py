@@ -289,15 +289,16 @@ EVENT_NAMES = {
     "contact_click", "project_view",
     "natal_chart", "natal_ask",       # natal_ask страница слала давно, а счётчик молча выкидывал
     "english_start", "english_msg", "english_pairs", "english_voice",
+    "fit_open",
 }
 _events_ready = False
 
 
-def record_event(name: str, props: dict, session: str) -> bool:
+def record_event(name: str, props: dict, session: str, trusted: bool = False) -> bool:
     """Пишем событие в Postgres. Нет базы — молча ничего не делаем:
     аналитика не тот повод, чтобы ронять сайт или спамить владельца."""
     global _events_ready
-    if not DATABASE_URL or name not in EVENT_NAMES:
+    if not DATABASE_URL or not (name in EVENT_NAMES or (trusted and name in SERVER_EVENT_NAMES)):
         return False
     try:
         import psycopg2
@@ -327,6 +328,82 @@ def record_event(name: str, props: dict, session: str) -> bool:
     except Exception as e:
         print(f"⚠️ Событие не записалось: {e}")
         return False
+
+
+# Фитнес-приложение «Силуэтика»: fit_open шлёт браузер, AI-события пишет сам сервер —
+# через /event их подделать нельзя, иначе любой накрутил бы счётчик анализов.
+SERVER_EVENT_NAMES = {"fit_ai_body", "fit_ai_meal"}
+FIT_EVENTS = ["fit_open", "fit_ai_body", "fit_ai_meal"]
+
+
+def fitness_stats_text() -> str:
+    """Сводка для команды /stats в телеграме владельца."""
+    if not DATABASE_URL:
+        return "База не подключена — статистики нет."
+    periods = (("За 24 часа", "1 day"), ("За 7 дней", "7 days"),
+               ("За 30 дней", "30 days"), ("За всё время", "100 years"))
+    lines = ["**Силуэтика — статистика**"]
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('events')")
+                if cur.fetchone()[0] is None:
+                    return "Событий пока нет — никто ещё не заходил."
+                for title, span in periods:
+                    cur.execute(
+                        "SELECT name, COUNT(*), COUNT(DISTINCT NULLIF(session, '')), "
+                        "COUNT(*) FILTER (WHERE props->>'ok' = 'false') "
+                        "FROM events WHERE name = ANY(%s) AND created_at > NOW() - %s::interval "
+                        "GROUP BY name", (FIT_EVENTS, span))
+                    rows = {r[0]: r[1:] for r in cur.fetchall()}
+                    cur.execute(
+                        "SELECT COUNT(*) FROM (SELECT MIN(created_at) AS first FROM events "
+                        "WHERE name = 'fit_open' AND session <> '' GROUP BY session) t "
+                        "WHERE first > NOW() - %s::interval", (span,))
+                    new = cur.fetchone()[0]
+                    opens, visitors, _ = rows.get("fit_open", (0, 0, 0))
+                    body, body_people, body_err = rows.get("fit_ai_body", (0, 0, 0))
+                    meal, meal_people, meal_err = rows.get("fit_ai_meal", (0, 0, 0))
+                    lines += [
+                        "",
+                        f"**{title}**",
+                        f"Посетителей: {visitors} (новых {new}), открытий: {opens}",
+                        f"AI-разборов фигуры: {body} (людей {body_people}"
+                        + (f", с ошибкой {body_err}" if body_err else "") + ")",
+                        f"Анализов еды: {meal} (людей {meal_people}"
+                        + (f", с ошибкой {meal_err}" if meal_err else "") + ")",
+                    ]
+                cur.execute(
+                    "SELECT props->>'ref', COUNT(DISTINCT session) FROM events "
+                    "WHERE name = 'fit_open' AND created_at > NOW() - INTERVAL '7 days' "
+                    "AND COALESCE(props->>'ref', '') <> '' GROUP BY 1 ORDER BY 2 DESC LIMIT 5")
+                refs = cur.fetchall()
+                cur.execute(
+                    "SELECT COUNT(DISTINCT session), "
+                    "COUNT(DISTINCT session) FILTER (WHERE props->>'mobile' = 'true'), "
+                    "COUNT(DISTINCT session) FILTER (WHERE props->>'pwa' = 'true') "
+                    "FROM events WHERE name = 'fit_open' AND created_at > NOW() - INTERVAL '7 days'")
+                total7, mobile7, pwa7 = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        return f"Не удалось прочитать статистику: {e}"[:300]
+    lines += ["", "**Откуда пришли (7 дней):** "
+              + (", ".join(f"{r} — {n}" for r, n in refs) if refs else "по прямой ссылке или неизвестно")]
+    if total7:
+        lines.append(f"**Устройства (7 дней):** с телефона {round(mobile7 * 100 / total7)}%, "
+                     f"установили как приложение: {pwa7}")
+    try:
+        import fitness_api
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        used = fitness_api._daily.get("*", 0) if fitness_api._daily_day == today else 0
+        lines.append(f"\nAI-запросов с полуночи UTC: {used} из {fitness_api.AI_DAILY_CAP} "
+                     "(счёт с последнего перезапуска сервера)")
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 def record_lead(name: str, service: str, contact: str = "") -> int:
@@ -1119,6 +1196,9 @@ def handle_tg_update(update: dict) -> None:
         _tg_set_mode(chat_id, "consult")
         _tg_send(chat_id, TG_HELLO, keyboard=True)
         return
+    if text.startswith("/stats") and TG_CHAT and chat_id == TG_CHAT:
+        _tg_send(chat_id, fitness_stats_text())
+        return
     if text.startswith("/mode") or text.startswith("/help"):
         _tg_send(chat_id, "С кем говорим?", keyboard=True)
         return
@@ -1196,7 +1276,10 @@ except Exception as _e:          # pragma: no cover
 # Фитнес-анализ фигуры по фото (BodyCoach AI) — отдельный файл и отдельный лимит.
 try:
     from fitness_api import build_router as _fitness_router
-    app.include_router(_fitness_router(rate_ok=_rate_ok, client_ip=_client_ip, notify=notify_owner))
+    app.include_router(_fitness_router(
+        rate_ok=_rate_ok, client_ip=_client_ip, notify=notify_owner,
+        record=lambda name, props, session: record_event(name, props, session, trusted=True),
+    ))
     FITNESS_READY, FITNESS_ERROR = True, ""
 except Exception as _e:          # pragma: no cover
     FITNESS_READY, FITNESS_ERROR = False, str(_e)

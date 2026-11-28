@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 # Порядок моделей: сначала явно заданная переменная, затем основная модель сервера,
 # затем актуальные запасные модели Gemini Vision.
@@ -512,7 +513,7 @@ def analyze_meal(
     }
 
 
-def build_router(rate_ok, client_ip, notify=None) -> APIRouter:
+def build_router(rate_ok, client_ip, notify=None, record=None) -> APIRouter:
     router = APIRouter(prefix="/fitness", tags=["fitness"])
 
     def _limited(request: Request, bucket: str, burst_max: int, daily_max: int, burst_msg: str):
@@ -539,6 +540,13 @@ def build_router(rate_ok, client_ip, notify=None) -> APIRouter:
             )
         return None
 
+    def _recorded(request: Request, name: str, status: int, props: dict[str, Any]):
+        """Запись в статистику уходит после ответа, чтобы база не задерживала анализ."""
+        if not record:
+            return None
+        visitor = re.sub(r"[^A-Za-z0-9-]", "", request.headers.get("x-visitor-id") or "")[:40]
+        return BackgroundTask(record, name, {"ok": status == 200, "status": status, **props}, visitor)
+
     @router.get("/health")
     def fitness_health(request: Request):
         if not rate_ok(client_ip(request), 60, "fhealth"):
@@ -561,7 +569,8 @@ def build_router(rate_ok, client_ip, notify=None) -> APIRouter:
         if blocked:
             return blocked
         status, payload = analyze_body(body.profile, body.metrics, body.photos, body.catalog)
-        return JSONResponse(payload, status_code=status)
+        return JSONResponse(payload, status_code=status, background=_recorded(
+            request, "fit_ai_body", status, {"photos": len(body.photos or {})}))
 
     @router.post("/meal")
     def fitness_meal(body: MealAnalyzeIn, request: Request):
@@ -578,6 +587,7 @@ def build_router(rate_ok, client_ip, notify=None) -> APIRouter:
             body.profile,
             body.dailyTarget,
         )
-        return JSONResponse(payload, status_code=status)
+        return JSONResponse(payload, status_code=status, background=_recorded(
+            request, "fit_ai_meal", status, {"photo": bool(body.photo)}))
 
     return router
